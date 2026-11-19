@@ -428,6 +428,32 @@ public sealed partial class HirBuilder
         }
     }
 
+    private static readonly bool NoFirstFields = Environment.GetEnvironmentVariable("REWIND_NO_FIRST_FIELDS") != null;
+
+    /// <summary>
+    /// A struct's address is also the address of its first field (and of that field's first field): where
+    /// something of the field's type is wanted there ("Value.ToString()" called with the address of the
+    /// struct that holds it), the location is that field. Unchanged when no field at the start is of exactly
+    /// that type.
+    /// </summary>
+    private HExpr AtStart(HExpr location, TypeSig? held, TypeSig? expected)
+    {
+        if (NoFirstFields || held == null || expected == null || Open(expected) || held.Key == expected.Key) return location;
+        int wanted = _p.Layouts.SizeOf(expected).Size;
+        HExpr current = location;
+        TypeSig type = held;
+        for (int depth = 0; depth < 8 && IsStructType(type) && !Open(type); depth++)
+        {
+            // (In a union, the field of the wanted size is the one meant.)
+            FieldSlot? first = _p.Layouts.FieldExactly(type, 0, wanted) is { } exact && exact.Type.Key == expected.Key ? exact : _p.Layouts.FieldAt(type, 0);
+            if (first is not { Offset: 0 } slot) break;
+            current = new HField { Object = current, Field = slot.Field, DeclaringType = type, Type = slot.Type };
+            type = slot.Type;
+            if (type.Key == expected.Key) return current;
+        }
+        return location;
+    }
+
     /// <summary>The storage location a pointer argument refers to.</summary>
     private HExpr? LocationOf(Node pointer, TypeSig? expected)
     {
@@ -437,7 +463,7 @@ public sealed partial class HirBuilder
         switch (s)
         {
             case SRef r:
-                return r.Location;
+                return AtStart(r.Location, r.Type, expected);
             case SFrame f when BufferAddress(f.Offset) is { } buffer:
             {
                 // In a stackalloc'd buffer: what the pointer points at.
@@ -486,9 +512,9 @@ public sealed partial class HirBuilder
                 return new HField { Object = null, Field = first, DeclaringType = statics.Type, Type = fieldType };
             }
             case SVal { Type: ByRefSig byRef } v:
-                return new HDeref(v.Expr) { Type = byRef.ElementType };
+                return AtStart(new HDeref(v.Expr) { Type = byRef.ElementType }, byRef.ElementType, expected);
             case SVal { Type: PointerSig pointerType } v:
-                return new HDeref(v.Expr) { Type = pointerType.ElementType };
+                return AtStart(new HDeref(v.Expr) { Type = pointerType.ElementType }, pointerType.ElementType, expected);
             default:
                 return null;
         }
