@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): stack arguments of calls to targets not yet known, switches through byte-indexed jump tables, jump-table registers dead after the jump. See FORK.md.
+// Modified by xob0t (2026): stack arguments of calls to targets not yet known, switches through byte-indexed jump tables, jump-table registers dead after the jump, volatile registers a direct callee leaves alone kept across the call. See FORK.md.
 using Iced.Intel;
 using Rewind.Analysis.Ir;
 using Rewind.Binary;
@@ -1305,7 +1305,8 @@ public sealed class X64Lifter : IMachineLifter
         return count;
     }
 
-    private void AfterCall(Node call, CallReturn returns)
+    /// <param name="clobbered">The volatile registers the callee can change (<see cref="CalleeRegisters"/>); the others keep their values.</param>
+    private void AfterCall(Node call, CallReturn returns, uint clobbered = CalleeRegisters.Volatile)
     {
         Node Proj(int which, VT type)
         {
@@ -1313,21 +1314,37 @@ public sealed class X64Lifter : IMachineLifter
             p.Imm = which;
             return p;
         }
+        // bit: the register's bit in clobbered (CalleeRegisters' numbering).
+        void Kill(int v, VT type, int bit)
+        {
+            if ((clobbered & 1u << bit) != 0) SetVar(v, _b.Undef(type));
+        }
+        const int Xmm = CalleeRegisters.XmmBit;
         // Registers the callee does not return anything in hold nothing meaningful afterwards.
         bool any = returns == CallReturn.Unknown;
-        SetVar(0, any || returns == CallReturn.Integer ? Proj(CallResult.IntReturn, VT.I64) : _b.Undef(VT.I64));
-        SetVar(VarXmm + 0, any || returns is CallReturn.Float or CallReturn.Double ? Proj(CallResult.FloatLane0, VT.I32) : _b.Undef(VT.I32));
-        SetVar(VarXmm + 1, any || returns == CallReturn.Double ? Proj(CallResult.FloatLane1, VT.I32) : _b.Undef(VT.I32));
-        SetVar(VarXmm + 2, _b.Undef(VT.I32));
-        SetVar(VarXmm + 3, _b.Undef(VT.I32));
-        // Caller-saved registers hold nothing meaningful afterwards.
-        foreach (int v in (int[])[1, 2, 8, 9, 10, 11]) SetVar(v, _b.Undef(VT.I64));
+        if (any || returns == CallReturn.Integer) SetVar(0, Proj(CallResult.IntReturn, VT.I64));
+        else Kill(0, VT.I64, 0);
+        if (any || returns is CallReturn.Float or CallReturn.Double) SetVar(VarXmm + 0, Proj(CallResult.FloatLane0, VT.I32));
+        else Kill(VarXmm + 0, VT.I32, Xmm);
+        if (any || returns == CallReturn.Double) SetVar(VarXmm + 1, Proj(CallResult.FloatLane1, VT.I32));
+        else Kill(VarXmm + 1, VT.I32, Xmm);
+        Kill(VarXmm + 2, VT.I32, Xmm);
+        Kill(VarXmm + 3, VT.I32, Xmm);
+        // Caller-saved registers hold nothing meaningful afterwards, unless the callee's code leaves them alone.
+        foreach (int v in (int[])[1, 2, 8, 9, 10, 11]) Kill(v, VT.I64, v);
         for (int x = 1; x <= 5; x++)
             for (int lane = 0; lane < 4; lane++)
-                SetVar(VarXmm + x * 4 + lane, _b.Undef(VT.I32));
+                Kill(VarXmm + x * 4 + lane, VT.I32, Xmm + x);
         SetVar(VarFlags, _b.Undef(VT.Flags));
         _rdxSignExtends = 0;
     }
+
+    /// <summary>Set REWIND_NO_CALLEE_REGISTERS to take every call as changing every volatile register.</summary>
+    private static readonly bool NoCalleeRegisters = Environment.GetEnvironmentVariable("REWIND_NO_CALLEE_REGISTERS") != null;
+
+    /// <summary>The volatile registers a call can change: for a direct call, the ones its target's code writes.</summary>
+    private uint ClobberedBy(in Instruction ins) =>
+        NoCalleeRegisters || ins.Op0Kind != OpKind.NearBranch64 ? CalleeRegisters.Volatile : CalleeRegisters.Clobbered(_image, ins.NearBranchTarget);
 
     /// <summary>Return convention of the call most recently emitted.</summary>
     private CallReturn _lastCallReturn;
@@ -1947,7 +1964,7 @@ public sealed class X64Lifter : IMachineLifter
                     n.Op1Kind == OpKind.Register && n.Op1Register == Register.RAX)
                     return;
                 Node call = EmitCall(ins, tail: false, noReturn: false);
-                AfterCall(call, _lastCallReturn);
+                AfterCall(call, _lastCallReturn, ClobberedBy(ins));
                 return;
             }
 
