@@ -582,6 +582,7 @@ public sealed class MethodPipeline
         AccessorFolding.Run(result, _program);
         LibraryInternals.Run(result, _program);
         HiddenImplementations.Run(result, _program);
+        BaseConstructorCalls.Run(result, this, _program);
         InitializerOrder.Run(result);
         UnsetLocals.Run(result);
         FlagMarkers(result);
