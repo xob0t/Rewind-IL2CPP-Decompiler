@@ -522,6 +522,27 @@ public sealed partial class HirBuilder
 
     // ---- results -----------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// A struct made from a value of another type: a struct that is one number, from that number ("new
+    /// Handle32(value)", its explicit conversion pasted in); anything else is marked.
+    /// </summary>
+    private HExpr StructOfValue(HExpr e, TypeSig structType, ulong addr)
+    {
+        TypeLayout layout = _p.Layouts.Of(structType);
+        if (layout.Known && layout.Fields.Length == 1 && layout.Fields[0] is { Offset: 0 } only && only.Size == layout.Size &&
+            only.Type is PrimitiveSig or { Definition.IsEnum: true } && !IsFloat(only.Type) && !IsFloat(e.Type) &&
+            (e.Type is PrimitiveSig or { Definition.IsEnum: true }) && !IsReference(e.Type) && BitsOf(e.Type) == BitsOf(only.Type))
+        {
+            HVar temp = _h.NewLocal(structType, "s");
+            temp.AddressTaken = true;
+            Emit(new HAssign(new HField { Object = new HLocal(temp) { Type = structType }, Field = only.Field, DeclaringType = structType, Type = only.Type }, e), addr);
+            return new HLocal(temp) { Type = structType };
+        }
+        string problem = $"could not rebuild {structType.DisplayName} from a {e.Type?.DisplayName ?? "value"}";
+        Problem(problem);
+        return Site(new HOpaque("struct_from_value", e) { Type = structType }, problem);
+    }
+
     private void FinishCall(Node call, HExpr expr, ReturnKind kind, TypeSig returnType, bool tail)
     {
         expr.Type ??= returnType;
@@ -532,7 +553,14 @@ public sealed partial class HirBuilder
                 Emit(new HEval(expr), call.Addr);
                 Emit(new HReturn(null), call.Addr);
             }
-            else Emit(new HReturn(expr), call.Addr);
+            else
+            {
+                // A struct returned where the call's result is something else (a conversion operator pasted in):
+                // the struct made from it.
+                if (_abi.ReturnType is { } returned && IsStructType(returned) && expr.Type is { } given && given.Key != returned.Key)
+                    expr = StructOfValue(expr, returned, call.Addr);
+                Emit(new HReturn(expr), call.Addr);
+            }
             return;
         }
 

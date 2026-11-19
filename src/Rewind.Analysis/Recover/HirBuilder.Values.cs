@@ -366,6 +366,9 @@ public sealed partial class HirBuilder
             Problem(ReferenceArithmetic);
             return new SVal(Site(new HOpaque("reference_arithmetic", new HBinary(op, left, right) { Type = TypeForBits(n.Type) }) { Type = TypeForBits(n.Type) }, ReferenceArithmetic));
         }
+        // Nor is a struct whose fields were not found in the bits computed with.
+        if (IsStructType(left.Type)) left = StructAsNumber(left, TypeForBits(n.Type));
+        if (IsStructType(right.Type)) right = StructAsNumber(right, TypeForBits(n.Type));
         TypeSig type = isShift ? ResultIntType(n, n.In[0]) : ResultIntType(n, n.In[0], n.In[1]);
         if (n.Op is Op.DivU or Op.RemU or Op.ShrU && ReferenceEquals(type, _int)) type = _uint;
         if (n.Op is Op.DivU or Op.RemU or Op.ShrU && ReferenceEquals(type, _long)) type = _ulong;
@@ -395,6 +398,29 @@ public sealed partial class HirBuilder
             if (left is HConst { Value: int or long } nothing && Convert.ToInt64(nothing.Value) == 0 && op is HBinaryOp.Or or HBinaryOp.Xor or HBinaryOp.Add && right is not HConst) return new SVal(right);
         }
         return new SVal(new HBinary(op, left, right) { Type = type });
+    }
+
+    private static readonly bool NoWholeStructTruncation = Environment.GetEnvironmentVariable("REWIND_NO_WHOLE_STRUCT_TRUNCATION") != null;
+    private static readonly bool NoStructNumbers = Environment.GetEnvironmentVariable("REWIND_NO_STRUCT_NUMBERS") != null;
+
+    /// <summary>
+    /// A struct (not one number: see ScalarOf) whose bytes are computed with as a number. Which of its fields
+    /// those bits are was not found; IL has no such conversion, so it is marked.
+    /// </summary>
+    private HExpr StructAsNumber(HExpr e, TypeSig type)
+    {
+        if (NoStructNumbers) return e;
+        string problem = $"{e.Type!.DisplayName} used as a number";
+        Problem(problem);
+        return Site(new HOpaque("struct_bits", e) { Type = type }, problem);
+    }
+
+    private HExpr NumberAsStruct(HExpr e, TypeSig structType)
+    {
+        if (NoStructNumbers) return e;
+        string problem = $"could not rebuild {structType.DisplayName} from a {e.Type?.DisplayName ?? "number"}";
+        Problem(problem);
+        return Site(new HOpaque("struct_from_value", e) { Type = structType }, problem);
     }
 
     private static readonly bool NoReferenceArithmetic = Environment.GetEnvironmentVariable("REWIND_NO_REFERENCE_ARITHMETIC") != null;
@@ -761,6 +787,8 @@ public sealed partial class HirBuilder
                 FieldSlot? slot = _p.Layouts.FieldAt(e.Type, 0);
                 if (slot is { } fs && fs.Offset == 0 && fs.Size * 8 == to)
                     return new SVal(new HField { Object = e, Field = fs.Field, DeclaringType = e.Type, Type = fs.Type });
+                // All of the struct fits: the truncation only drops the register bits above it.
+                if (!NoWholeStructTruncation && _p.Layouts.Of(e.Type) is { Known: true, Size: > 0 } whole && whole.Size * 8 <= to) return v;
                 // A struct that is one wider number: its low bytes are that number's ("(byte)delta" is (byte)delta.packed).
                 if (!NoNarrowScalars && ScalarOf(e, 64) is { } scalar && !ReferenceEquals(scalar, e))
                 {
@@ -768,6 +796,7 @@ public sealed partial class HirBuilder
                     known = BitsOf(e.Type);
                     if (known != 0 && known <= to) return new SVal(e);
                 }
+                if (IsStructType(e.Type)) return new SVal(StructAsNumber(e, TypeForBits(n.Type)));
             }
             if (known == 0 && inner.Type == VT.I64 && to == 32 && e.Type == null) return v; // untyped 32-bit value in a 64-bit register
             // The low bytes of a float or double are part of its bits, not the number converted.
@@ -782,6 +811,7 @@ public sealed partial class HirBuilder
     general:
         {
             HExpr e = IntValue(inner);
+            if (IsStructType(e.Type)) return new SVal(StructAsNumber(e, TypeForBits(n.Type)));
             HConvKind kind = to switch { 8 => HConvKind.U1, 16 => HConvKind.U2, 32 => HConvKind.I4, _ => HConvKind.I8 };
             TypeSig type = to switch { 8 => _byte, 16 => _ushort, 32 => _int, _ => _long };
             if (to is 8 or 16 or 32) return new SVal(Shortened(kind, type, PartOfCombined(e, 0, to) ?? e, to));

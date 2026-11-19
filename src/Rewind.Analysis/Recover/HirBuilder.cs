@@ -1864,6 +1864,14 @@ public sealed partial class HirBuilder
             HExpr bits = FloatBits(e);
             return ReferenceEquals(target, _ulong) ? new HConv(HConvKind.U8, bits) { Type = _ulong } : bits;
         }
+        // A number where a struct goes, or a struct where a number goes, with nothing above that told which
+        // fields the bits are: no conversion IL has. (A struct that is one number is that number.)
+        if (IsStructType(target) && from is PrimitiveSig && !IsStructType(from)) return NumberAsStruct(e, target);
+        if (IsStructType(from) && target is PrimitiveSig)
+        {
+            HExpr scalar = ScalarOf(e, BitsOf(target));
+            return IsStructType(scalar.Type) ? StructAsNumber(e, target) : scalar;
+        }
         return e;
     }
 }
