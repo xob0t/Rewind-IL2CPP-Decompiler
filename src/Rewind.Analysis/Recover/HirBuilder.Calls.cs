@@ -2442,6 +2442,7 @@ public sealed partial class HirBuilder
                 if (a0 == null || a1 == null || EvalKlass(a1) is not { } boxedType) break;
                 if (!_castTypes.TryGetValue(a0, out List<TypeSig>? known)) _castTypes[a0] = known = [];
                 if (!known.Contains(boxedType)) known.Insert(0, boxedType);
+                AddCastPlace(a0, _block, call);
                 if (result != null) _sem[result] = new SUnboxed(a0);
                 return;
             }

@@ -35,6 +35,12 @@ public sealed partial class HirBuilder
     private readonly HashSet<Node> _materialize = [];
     private readonly Dictionary<Node, int> _position = [];
     private readonly Dictionary<Node, List<TypeSig>> _castTypes = [];
+    /// <summary>Where each object's class checks are (CastFact's At and From): a check holds only past its place.</summary>
+    private readonly Dictionary<Node, List<(Block At, Node? From)>> _castPlaces = [];
+    /// <summary>CastHoldsAtStart's answers, per object and block.</summary>
+    private readonly Dictionary<(Node, Block), bool> _castAtStart = [];
+    /// <summary>The node ProcessBlock is building: where in _block a use is.</summary>
+    private Node? _node;
     private readonly Dictionary<(int Offset, string TypeKey), HVar> _frameVars = [];
     private readonly Dictionary<int, TypeSig> _frameTypes = [];
     /// <summary>Untyped stack slots accessed at overlapping ranges of different widths: start -> width (up to 8 bytes).</summary>
@@ -489,6 +495,69 @@ public sealed partial class HirBuilder
     /// The type an object is known to have here because a type test on every way to this point succeeded.
     /// (After "if (o is Goblin)" the compiled code keeps using o itself, as a Goblin.)
     /// </summary>
+    /// <summary>
+    /// Whether a class check of obj that a guard removed holds at the node being built: every way from the entry to it
+    /// passes a check. A method that checks this's class on one path only (a field of a subclass read when a level
+    /// number says so) uses this unchecked everywhere else, and a cast there would throw; a read in the check's own
+    /// block before the check would throw before what the native code did first. A check the CFG no longer reaches
+    /// (a constant-false arm) proves nothing. Outside the building of blocks (the planning passes): true.
+    /// </summary>
+    private bool CastHoldsHere(Node obj)
+    {
+        if (_cfg == null || _block == null) return true;
+        if (!_castPlaces.TryGetValue(obj, out List<(Block At, Node? From)>? places) || !_cfg.IsReachable(_block)) return false;
+        foreach (var (at, from) in places)
+        {
+            if (!ReferenceEquals(at, _block) || _node == null || !_position.TryGetValue(_node, out int here)) continue;
+            // From null, or a node a later pass took out of the block: the check is at the block's end at the latest.
+            if (from != null && !ReferenceEquals(from.Block, _block)) continue;
+            int checkAt = from != null && _position.TryGetValue(from, out int fromAt) ? fromAt : _block.Nodes.Count;
+            // Past the check; or before it with nothing between that the cast's throw would skip: the compiler loads
+            // fields before the class test it doesn't depend on, and the source's cast came first.
+            if (checkAt <= here || !EffectBetween(_block, here, checkAt)) return true;
+        }
+        return CastHoldsAtStart(obj, _block, places);
+    }
+
+    /// <summary>Whether a store or a call (an effect the native code performed) is between two nodes of block.</summary>
+    private static bool EffectBetween(Block block, int after, int before)
+    {
+        for (int i = after + 1; i < before && i < block.Nodes.Count; i++)
+            if (!block.Nodes[i].Dead && block.Nodes[i].Op is Op.Store or Op.Call)
+                return true;
+        return false;
+    }
+
+    /// <summary>Whether every way from the entry to block's first node passes the end of a block that checks obj.</summary>
+    private bool CastHoldsAtStart(Node obj, Block block, List<(Block At, Node? From)> places)
+    {
+        if (_castAtStart.TryGetValue((obj, block), out bool known)) return known;
+        var checks = new HashSet<Block>();
+        foreach (var (at, _) in places)
+            if (_cfg.IsReachable(at)) checks.Add(at);
+        var seen = new HashSet<Block> { _fn.Entry };
+        var pending = new Stack<Block>();
+        pending.Push(_fn.Entry);
+        bool reached = false;
+        while (pending.Count > 0 && !reached)
+        {
+            Block b = pending.Pop();
+            if (ReferenceEquals(b, block)) reached = true;
+            else if (!checks.Contains(b))
+                foreach (Block s in b.Succs)
+                    if (seen.Add(s)) pending.Push(s);
+        }
+        return _castAtStart[(obj, block)] = !reached;
+    }
+
+    /// <summary>A class check found while building (an unboxing's): it holds from node on.</summary>
+    private void AddCastPlace(Node obj, Block at, Node? from)
+    {
+        if (!_castPlaces.TryGetValue(obj, out List<(Block At, Node? From)>? places)) _castPlaces[obj] = places = [];
+        places.Add((at, from));
+        foreach (var key in _castAtStart.Keys.Where(k => ReferenceEquals(k.Item1, obj)).ToList()) _castAtStart.Remove(key);
+    }
+
     private TypeSig? TestedType(Node obj)
     {
         int guard = 0;
@@ -763,11 +832,15 @@ public sealed partial class HirBuilder
             for (int i = 0; i < b.Nodes.Count; i++) _position[b.Nodes[i]] = i;
         }
 
+        // A check in a block the CFG no longer reaches (or no longer has) was on a path that is gone: no fact at all,
+        // neither a cast type nor a place.
+        var reach = new Cfg(_fn);
         foreach (CastFact cast in _l.Normalization.Casts)
         {
-            if (EvalKlass(cast.Klass) is not { } type) continue;
+            if (!reach.IsReachable(cast.At) || EvalKlass(cast.Klass) is not { } type) continue;
             if (!_castTypes.TryGetValue(cast.Object, out List<TypeSig>? list)) _castTypes[cast.Object] = list = [];
             if (!list.Contains(type)) list.Add(type);
+            AddCastPlace(cast.Object, cast.At, cast.From);
         }
 
         BindParameters();
@@ -1587,6 +1660,7 @@ public sealed partial class HirBuilder
         foreach (Node n in b.Nodes)
         {
             if (n.Dead) continue;
+            _node = n;
             switch (n.Op)
             {
                 case Op.Store:

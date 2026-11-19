@@ -1748,7 +1748,10 @@ public sealed partial class HirBuilder
     {
         HExpr e = v.Expr;
         TypeSig? type = e.Type;
-        if (_castTypes.TryGetValue(a.Base!, out List<TypeSig>? casts) && casts.Count == 1 && IsReference(casts[0]))
+        // Only where the check holds (CastHoldsHere): a field the static type lacks, read where no check proves the
+        // class, stays unresolved rather than read through a cast to a class the object may not have (a sibling's).
+        if (_castTypes.TryGetValue(a.Base!, out List<TypeSig>? casts) && casts.Count == 1 && IsReference(casts[0]) &&
+            (NoCastDominance || CastHoldsHere(a.Base!)))
         {
             // A checked cast guards this use: view the object as the cast type.
             e = new HTypeExpr(HTypeOp.CastClass, casts[0], e) { Type = casts[0] };
@@ -1999,6 +2002,7 @@ public sealed partial class HirBuilder
     private static readonly bool NoBoxedTests = Environment.GetEnvironmentVariable("REWIND_NO_BOXED_TESTS") != null;
     private static readonly bool NoFlaggedCasts = Environment.GetEnvironmentVariable("REWIND_NO_FLAGGED_CASTS") != null;
     private static readonly bool NoStoredCasts = Environment.GetEnvironmentVariable("REWIND_NO_STORED_CASTS") != null;
+    private static readonly bool NoCastDominance = Environment.GetEnvironmentVariable("REWIND_NO_CAST_DOMINANCE") != null;
     private static readonly bool NoStructPieces = Environment.GetEnvironmentVariable("REWIND_NO_STRUCT_PIECES") != null;
     private static readonly bool NoStructTops = Environment.GetEnvironmentVariable("REWIND_NO_STRUCT_TOPS") != null;
     private static readonly bool FlaggedTrace = Environment.GetEnvironmentVariable("REWIND_FLAGGED_TRACE") != null;
