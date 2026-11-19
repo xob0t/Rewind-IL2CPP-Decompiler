@@ -43,8 +43,7 @@ public sealed partial class HirBuilder
     private bool Leaves(HExpr owner, TypeSig type, int offset, int size, int baseOffset, List<Part> output, int depth = 0)
     {
         if (depth > 8) return false;
-        TypeLayout layout = _p.Layouts.Of(type);
-        foreach (FieldSlot slot in layout.Fields)
+        foreach (FieldSlot slot in InstanceFields(type))
         {
             int start = Math.Max(offset, slot.Offset), end = Math.Min(offset + size, slot.Offset + slot.Size);
             if (start >= end) continue;
@@ -64,7 +63,28 @@ public sealed partial class HirBuilder
         return true;
     }
 
-    private static readonly bool NoUnions = Environment.GetEnvironmentVariable("REWIND_NO_UNION_PARTS") != null;
+    private static readonly bool NoInheritedParts = Environment.GetEnvironmentVariable("REWIND_NO_INHERITED_PARTS") != null;
+
+    /// <summary>
+    /// The instance fields an object of <paramref name="type"/> has, by offset: a struct's own, a class's own and
+    /// those of each class it derives from (one wide write can set the last field a base class declares and the
+    /// first of the class below, or two flags side by side in a base class).
+    /// </summary>
+    private IEnumerable<FieldSlot> InstanceFields(TypeSig type)
+    {
+        TypeLayout layout = _p.Layouts.Of(type);
+        if (NoInheritedParts || type.Definition is not { IsValueType: false } definition || definition.BaseType == null) return layout.Fields;
+        var chain = new List<FieldSlot>();
+        for (TypeSig? current = type; current?.Definition is { } def;)
+        {
+            chain.AddRange(_p.Layouts.Of(current).Fields);
+            if (def.BaseType == null) break;
+            current = _m.Sigs.Substitute(def.BaseType, current is GenericInstSig g ? g.Arguments : [], []);
+        }
+        return chain.OrderBy(f => f.Offset);
+    }
+
+    private static readonly bool NoUnions =Environment.GetEnvironmentVariable("REWIND_NO_UNION_PARTS") != null;
 
     /// <summary>
     /// The fields that fill a struct whose fields lie over each other (a union, as Color32's "rgba" over "r",
