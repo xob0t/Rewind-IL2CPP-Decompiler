@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): stack arguments of calls to targets not yet known. See FORK.md.
 using Iced.Intel;
 using Rewind.Analysis.Ir;
 using Rewind.Binary;
@@ -1239,12 +1240,68 @@ public sealed class X64Lifter : IMachineLifter
         // A call pushes the return address on top of them; a jump to another function leaves the caller's
         // return address where it is, so there they sit one slot further up already.
         int first = tail && !NoTailStackFix ? 0x28 : 0x20;
+        if (shape == null && !NoStoredStackArguments) stackSlots = Math.Max(stackSlots, StoredStackSlots(sp, first));
         for (int i = 0; i < stackSlots; i++)
         {
             inputs.Add(_b.Load(_b.Add(sp, _b.Const(VT.I64, first + 8 * i)), VT.I64));
             info.Slots.Add(new ArgSlot(ArgSlotKind.Stack, i));
         }
         return inputs.ToArray();
+    }
+
+    private static readonly bool NoStoredStackArguments = Environment.GetEnvironmentVariable("REWIND_NO_STORED_STACK_ARGUMENTS") != null;
+
+    /// <summary>
+    /// How many stack argument slots, from the first on, the code just before a call writes: each of them
+    /// written since the previous call, on every way to it. A call whose target is not known yet (a virtual
+    /// call, say) has as many stack arguments as that run is long; a method with many parameters has more than
+    /// the few slots captured on speculation, and the rest would be lost. Locals sit above the outgoing area,
+    /// so a run that starts at the first slot and has no hole is the arguments being set up. The writes can
+    /// start in the blocks before (the arguments two calls share, written before the branch between them).
+    /// </summary>
+    private int StoredStackSlots(Node sp, int first)
+    {
+        Node root = sp;
+        long bias = 0;
+        if (sp.Op == Op.Add && sp.In[1].IsConst)
+        {
+            root = sp.In[0];
+            bias = IrBuilder.SImm(sp.In[1]);
+        }
+        HashSet<int> Stored(Block block, int depth)
+        {
+            var stored = new HashSet<int>();
+            List<Node> nodes = block.Nodes;
+            for (int i = nodes.Count - 1; i >= 0; i--)
+            {
+                Node n = nodes[i];
+                if (n.Op is Op.Call or Op.TailCall) return stored;
+                if (n.Op != Op.Store) continue;
+                Node address = n.In[0];
+                long offset;
+                if (ReferenceEquals(address, root)) offset = 0;
+                else if (address.Op == Op.Add && ReferenceEquals(address.In[0], root) && address.In[1].IsConst) offset = IrBuilder.SImm(address.In[1]);
+                else continue;
+                offset -= bias + first;
+                if (offset < 0 || offset >= 8 * 64) continue;
+                stored.Add((int)(offset / 8));
+            }
+            // (A block not lifted yet - one that loops back here - has no nodes and adds nothing.)
+            if (depth == 0 || block.Preds.Count == 0 || block.Preds.Any(p => p.Nodes.Count == 0)) return stored;
+            HashSet<int>? before = null;
+            foreach (Block p in block.Preds)
+            {
+                HashSet<int> set = Stored(p, depth - 1);
+                if (before == null) before = set;
+                else before.IntersectWith(set);
+            }
+            stored.UnionWith(before!);
+            return stored;
+        }
+        HashSet<int> all = Stored(_b.Current, 4);
+        int count = 0;
+        while (all.Contains(count)) count++;
+        return count;
     }
 
     private void AfterCall(Node call, CallReturn returns)
