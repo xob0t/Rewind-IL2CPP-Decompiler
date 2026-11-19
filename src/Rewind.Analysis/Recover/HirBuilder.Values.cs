@@ -2043,7 +2043,14 @@ public sealed partial class HirBuilder
                 // Reading through a selected address is selecting between the two values.
                 return new SVal(new HSelect(either.Condition, first.Target, second.Target) { Type = picked.Type });
             case PLocation loc:
-                return new SVal(loc.Location is { Type: null } ? WithType(loc.Location, loc.Type) : loc.Location);
+            {
+                HExpr read = loc.Location is { Type: null } ? WithType(loc.Location, loc.Type) : loc.Location;
+                // The low half of a 64-bit integer ("(int)l" read as the first four bytes of a long field): the
+                // field cut to what was read, as the register holds it (32 bits, compared or extended as the code says).
+                if (!NoNarrowReads && n.Type == VT.I32 && loc.Type is PrimitiveSig { Element: Il2CppTypeEnum.I8 or Il2CppTypeEnum.U8 })
+                    return new SVal(new HConv(HConvKind.I4, read) { Type = _int });
+                return new SVal(read);
+            }
             case PPair pair:
                 return new SPair(pair.Low, pair.High);
             case PParts parts:
@@ -2163,6 +2170,7 @@ public sealed partial class HirBuilder
     }
 
     private static readonly bool NoLowHalves = Environment.GetEnvironmentVariable("REWIND_NO_LOW_HALVES") != null;
+    private static readonly bool NoNarrowReads = Environment.GetEnvironmentVariable("REWIND_NO_NARROW_READS") != null;
     private static readonly bool NoUnreadHalves = Environment.GetEnvironmentVariable("REWIND_NO_UNREAD_HALVES") != null;
 
     /// <summary>A struct of four bytes or fewer: in a 64-bit slot it is in the low half.</summary>
