@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): virtual calls through merged class pointers, string indexer, gaps always marked, inlined object hash, small structs as numbers, floating-point negation, merged struct returns, low halves of 64-bit fields, casts of stored objects. See FORK.md.
+// Modified by xob0t (2026): virtual calls through merged class pointers, string indexer, gaps always marked, inlined object hash, small structs as numbers, floating-point negation, merged struct returns, low halves of 64-bit fields, casts of stored objects, unboxed reads after a type test. See FORK.md.
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
 using Rewind.Analysis.X64;
@@ -913,7 +913,7 @@ public sealed partial class HirBuilder
     /// <summary>The pointer to a runtime generic context (of a class or a method), and one entry of such a context.</summary>
     private sealed record PRgctx(SRgctx Context) : Place;
     private sealed record PRgctxItem(SRgctx Context, int Index) : Place;
-    private sealed record PUnboxed(Node Object, int Offset) : Place;
+    private sealed record PUnboxed(Node Object, int Offset, TypeSig? Type = null) : Place;
     private record PUnknown(string Why) : Place;
     /// <summary>
     /// Bytes of a struct that are not one of its fields nor a run of whole fields: [Offset, Offset + Size) of the
@@ -1805,6 +1805,10 @@ public sealed partial class HirBuilder
                 Place refined = FieldPlace(cast, tested, (int)a.Offset, size);
                 if (refined is not PUnknown) return refined;
             }
+            // Past the object header of an object known to be a boxed value: the value inside (an unbox whose
+            // class check the compiler dropped, since a test on the way here settled it).
+            if (direct is PUnknown && !NoTestedUnboxes && a.Offset >= _header && BoxedType(a.Base!) is { } boxed)
+                return new PUnboxed(a.Base!, (int)(a.Offset - _header), boxed);
             return direct;
         }
         return new PUnknown($"memory access through a {type.DisplayName} value");
@@ -1852,6 +1856,20 @@ public sealed partial class HirBuilder
     }
 
     private static readonly bool NoUnboxedWords = Environment.GetEnvironmentVariable("REWIND_NO_UNBOXED_WORDS") != null;
+    private static readonly bool NoTestedUnboxes = Environment.GetEnvironmentVariable("REWIND_NO_TESTED_UNBOXES") != null;
+
+    /// <summary>
+    /// The value type an object is known here to be a boxed instance of: a type test on every way here ("if (o
+    /// is int)"), an exact class comparison, or the class check of a cast the normalizer took out.
+    /// </summary>
+    private TypeSig? BoxedType(Node obj)
+    {
+        static bool Boxed(TypeSig t) => t.IsValueType && t is not SzArraySig and not ArraySig && !t.IsVoid;
+        if (TestedType(obj) is { } tested && Boxed(tested)) return tested;
+        if (ProvenClass(obj, _block) is { } proven && Boxed(proven)) return proven;
+        if (_castTypes.TryGetValue(obj, out List<TypeSig>? casts) && casts.Count == 1 && Boxed(casts[0])) return casts[0];
+        return null;
+    }
 
     /// <summary>
     /// The value type an object is known to be a boxed instance of where <paramref name="at"/> runs: an exact
@@ -2079,7 +2097,7 @@ public sealed partial class HirBuilder
                 return RgctxValue(entry.Context, entry.Index);
             case PUnboxed u:
             {
-                TypeSig? type = _castTypes.TryGetValue(u.Object, out List<TypeSig>? casts) && casts.Count != 0 ? casts[0] : null;
+                TypeSig? type = u.Type ?? (_castTypes.TryGetValue(u.Object, out List<TypeSig>? casts) && casts.Count != 0 ? casts[0] : null);
                 if (type == null && n.Block != null) type = ProvenClass(u.Object, n.Block);
                 if (type == null)
                 {
