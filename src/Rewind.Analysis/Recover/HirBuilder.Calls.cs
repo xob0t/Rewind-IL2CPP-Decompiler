@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): float arguments of native calls, slot-specialized invokers, offset-0 field addresses, gaps always marked, small structs as numbers, floating-point negation. See FORK.md.
+// Modified by xob0t (2026): float arguments of native calls, slot-specialized invokers, offset-0 field addresses, gaps always marked, small structs as numbers, floating-point negation, inlined compare-exchange on references. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
@@ -841,6 +841,8 @@ public sealed partial class HirBuilder
         return constants;
     }
 
+    private static readonly bool NoInlineCompareExchange = Environment.GetEnvironmentVariable("REWIND_NO_INLINE_COMPARE_EXCHANGE") != null;
+
     private void EmitIntrinsic(Node call, CallInfo info)
     {
         if (TryEmitBlockOp(call)) return;
@@ -858,6 +860,25 @@ public sealed partial class HirBuilder
                 _sem[call] = new SVal(new HLocal(t) { Type = t.Type });
             }
             else _sem[call] = new SVal(rounded);
+            return;
+        }
+        // "lock cmpxchg" on a reference field (an inlined field-like event's add or remove, a lazy initializer):
+        // what Interlocked.CompareExchange<T> does with it, as for the runtime's own helper.
+        if (!NoInlineCompareExchange && info.Intrinsic == "atomic_compare_exchange" && call.In.Length == 3 && call.Type == VT.I64 &&
+            LocationOf(call.In[0], null) is { Type: { } held } location && IsReference(held) &&
+            _m.FindType("System.Threading.Interlocked")?.Methods.FirstOrDefault(m =>
+                m.Name == "CompareExchange" && m.GenericParameters.Length == 1 && m.Parameters.Length == 3) is { } compareExchange)
+        {
+            HExpr[] arguments = [new HAddressOf(location) { Type = _m.Sigs.ByRef(held) }, ValueFor(call.In[1], held), ValueFor(call.In[2], held)];
+            var exchange = new HCall { Method = compareExchange, MethodArguments = [held], Arguments = arguments, Type = held };
+            if (!IsUsed(call)) Emit(new HEval(exchange), call.Addr);
+            else
+            {
+                // (Once, into a variable: the exchange is done where the code does it, and its result read after.)
+                HVar t = Temp(held, call.Type);
+                Emit(new HAssign(new HLocal(t) { Type = held }, exchange), call.Addr);
+                _sem[call] = new SVal(new HLocal(t) { Type = held });
+            }
             return;
         }
         HExpr[] args = call.In.Select(Value).ToArray();
