@@ -202,6 +202,11 @@ public sealed class HOpaque(string text, params HExpr[] operands) : HExpr
     public HExpr[] Operands = operands;
     /// <summary>The problem reported where this marker was made, if any (see HMethod.SiteProblems).</summary>
     public string? Problem;
+    /// <summary>
+    /// A statement that marks code which runs as it stands but is not what was written in a form IL accepts:
+    /// written as a note where it is (__Rewind.Note, which does nothing) instead of a stop (__Rewind.Effect).
+    /// </summary>
+    public bool Remark;
 }
 
 // ---- statements ----------------------------------------------------------------------------------------------

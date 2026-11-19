@@ -17,7 +17,8 @@ namespace Rewind.Analysis.Recover;
 /// - Otherwise, where the base class has a constructor that does nothing, its call is what was there: it goes
 ///   after the stores of field initializers, where C# puts it. Parameters such a constructor never reads are
 ///   given default values (any value does the same).
-/// - Otherwise what ran is not known, and the place is marked as a gap.
+/// - Otherwise what ran is not known, and the place is marked as a gap: with a note where the call belongs,
+///   which leaves the constructor running as it did.
 /// </summary>
 internal static class BaseConstructorCalls
 {
@@ -61,7 +62,8 @@ internal static class BaseConstructorCalls
         string problem = $"{Missing} ({baseType.Name})";
         if (method.Problems.Count < 64) method.Problems.Add(problem);
         method.SiteProblems.Add(problem);
-        entry.Insert(AfterInitializers(entry, owner), new HEval(new HOpaque("base_constructor") { Problem = problem }));
+        // (The constructor does what the original did, only IL does not accept it: the mark does not stop it.)
+        entry.Insert(AfterInitializers(entry, owner), new HEval(new HOpaque("base_constructor") { Problem = problem, Remark = true }));
     }
 
     /// <summary>Whether a constructor of the class or of its base class is run on the object anywhere in the method.</summary>

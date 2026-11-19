@@ -376,8 +376,8 @@ public sealed class BodyEmitter
                 case HEval e:
                     if (e.Expression is HOpaque opaque)
                     {
-                        _il.Emit(OpCodes.Ldstr, Describe(opaque));
-                        _il.Emit(OpCodes.Call, _owner.MarkersFor(_module).Effect);
+                        _il.Emit(OpCodes.Ldstr, opaque.Remark ? opaque.Problem ?? Describe(opaque) : Describe(opaque));
+                        _il.Emit(OpCodes.Call, opaque.Remark ? _owner.MarkersFor(_module).Note : _owner.MarkersFor(_module).Effect);
                         return false;
                     }
                     Value(e.Expression);

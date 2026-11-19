@@ -76,7 +76,8 @@ internal static partial class ConstructorFolding
             if (constructor.Name != ".ctor" || constructor.IsStatic) continue;
             HMethod? body = pipeline.ConstructorBody(constructor, classArguments);
             if (body == null) continue;
-            List<HStmt> statements = body.Blocks[0].Statements;
+            foreach (List<HStmt> statements in Variants(body.Blocks[0].Statements))
+            {
             int length = statements.Count - 1; // without the final return
             if (length < bestLength || (length == bestLength && best != null && best.Parameters.Length <= constructor.Parameters.Length)) continue;
 
@@ -99,6 +100,7 @@ internal static partial class ConstructorFolding
                 bestStart = start;
                 bestLength = length;
                 break;
+            }
             }
         }
         if (best == null || bestArguments == null) return false;
@@ -126,6 +128,91 @@ internal static partial class ConstructorFolding
         site.Insert(bestStart, creation);
         site.RemoveAt(at);
         return true;
+    }
+
+    private static readonly bool NoMarkedRawConstructors = Environment.GetEnvironmentVariable("REWIND_NO_MARKED_RAW_CONSTRUCTORS") != null;
+
+    /// <summary>
+    /// In the finished method: an object allocated raw whose own constructor was not put back, but a base
+    /// class's constructor was, as a call on the object. A constructor run on anything but "this" inside a
+    /// constructor is no IL a verifier accepts. The code does what the original did, so it stays; the place is
+    /// marked with a note (one that does not stop the code) and the method is reported incomplete.
+    /// </summary>
+    public static void MarkRawConstructors(HMethod method)
+    {
+        if (NoMarkedRawConstructors) return;
+        foreach (HBlock block in method.Blocks)
+            for (int i = block.Statements.Count - 1; i >= 0; i--)
+            {
+                if (block.Statements[i] is not HAssign { Target: HLocal { Variable: var created }, Value: HTypeExpr { Op: HTypeOp.Allocate } allocation } ||
+                    !RunsConstructorOn(method, created))
+                    continue;
+                string invalid = $"the constructor of {allocation.Target.ShortName} was not put back: a constructor runs on the object allocated raw";
+                if (method.Problems.Count < 64) method.Problems.Add(invalid);
+                method.SiteProblems.Add(invalid);
+                block.Statements.Insert(i, new HEval(new HOpaque("raw_constructor") { Problem = invalid, Remark = true }) { Address = block.Statements[i].Address });
+            }
+    }
+
+    /// <summary>Whether a constructor is called on the object a variable holds (or a variable it is copied into).</summary>
+    private static bool RunsConstructorOn(HMethod method, HVar created)
+    {
+        var holders = new HashSet<HVar> { created };
+        for (bool more = true; more;)
+        {
+            more = false;
+            foreach (HBlock b in method.Blocks)
+                foreach (HStmt s in b.Statements)
+                    if (s is HAssign { Target: HLocal { Variable: var copy }, Value: HLocal { Variable: var from } } && holders.Contains(from) && holders.Add(copy))
+                        more = true;
+        }
+        bool found = false;
+        foreach (HBlock b in method.Blocks)
+            foreach (HStmt s in b.Statements)
+                FinallyFolding.Visit(s, e => found |= e is HCall { Method.Name: ".ctor", This: HLocal { Variable: var v } } && holders.Contains(v));
+        return found;
+    }
+
+    private static readonly bool NoPropagatedTemporaries = Environment.GetEnvironmentVariable("REWIND_NO_CONSTRUCTOR_TEMP_PROPAGATION") != null;
+
+    /// <summary>
+    /// The constructor's statements as they are, and - where it keeps a value computed from its parameters
+    /// alone in a temporary ("double scaled = value / 255; this.scaled = scaled;") - with that value written
+    /// where the temporary is read. The compiler does the same at a site where it knows the arguments: there the
+    /// value is a constant stored straight into the field, and no temporary is left to match.
+    /// </summary>
+    private static IEnumerable<List<HStmt>> Variants(List<HStmt> statements)
+    {
+        yield return statements;
+        if (NoPropagatedTemporaries) yield break;
+        var sets = new Dictionary<HVar, int>();
+        foreach (HStmt st in statements)
+            if (st is HAssign { Target: HLocal { Variable: var v } }) sets[v] = sets.GetValueOrDefault(v) + 1;
+        var known = new Dictionary<HVar, HExpr>();
+        var propagated = new List<HStmt>(statements.Count);
+        foreach (HStmt st in statements)
+        {
+            HStmt current = st;
+            if (known.Count != 0 && st is not (HReturn or HJump or HBranch or HSwitch or HThrow))
+            {
+                if (HirCopy.Of(st, e => e is HLocal { Variable: var read } && known.TryGetValue(read, out HExpr? value) ? HirCopy.Of(value) : null) is not { } copy) yield break;
+                current = copy;
+            }
+            if (current is HAssign { Target: HLocal { Variable: var temp }, Value: var computed } && sets[temp] == 1 && HirBuilder.IsPure(computed) && !Names(computed))
+            {
+                known[temp] = computed;
+                continue;
+            }
+            propagated.Add(current);
+        }
+        if (known.Count != 0) yield return propagated;
+
+        static bool Names(HExpr e)
+        {
+            bool named = false;
+            FinallyFolding.Visit(e, x => named |= x is HLocal or HArg { Index: < 0 });
+            return named;
+        }
     }
 
     /// <summary>

@@ -583,6 +583,7 @@ public sealed class MethodPipeline
         LibraryInternals.Run(result, _program);
         HiddenImplementations.Run(result, _program);
         BaseConstructorCalls.Run(result, this, _program);
+        ConstructorFolding.MarkRawConstructors(result);
         InitializerOrder.Run(result);
         UnsetLocals.Run(result);
         FlagMarkers(result);
