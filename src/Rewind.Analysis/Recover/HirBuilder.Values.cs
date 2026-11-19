@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): virtual calls through merged class pointers, string indexer, gaps always marked, inlined object hash, small structs as numbers, floating-point negation, merged struct returns, low halves of 64-bit fields, casts of stored objects, unboxed reads after a type test. See FORK.md.
+// Modified by xob0t (2026): virtual calls through merged class pointers, string indexer, gaps always marked, inlined object hash, small structs as numbers, floating-point negation, merged struct returns, low halves of 64-bit fields, casts of stored objects, unboxed reads after a type test, a class entry's address merged from several paths. See FORK.md.
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
 using Rewind.Analysis.X64;
@@ -1074,7 +1074,14 @@ public sealed partial class HirBuilder
         foreach (var (node, scale) in terms)
         {
             if (scale != 1) continue;
-            Sem s = node.Op == Op.Phi && MergedObjKlass(node) is { } merged ? merged : Eval(node);
+            Sem s;
+            if (node.Op == Op.Phi && MergedObjKlass(node) is { } merged) s = merged;
+            else if (node.Op == Op.Phi && MergedObjKlassEntry(node) is ({ } entryOf, var past))
+            {
+                s = entryOf;
+                offset += past;
+            }
+            else s = Eval(node);
             if (!IsPointerLike(s) && !(s is SVal { Type: { } wrapper } && IsReferenceWrapper(wrapper))) continue;
             baseNode = node;
             baseSem = s;
@@ -1131,6 +1138,55 @@ public sealed partial class HirBuilder
     }
 
     private static readonly bool NoMergedKlass = Environment.GetEnvironmentVariable("REWIND_NO_MERGED_KLASS") != null;
+    private static readonly bool NoMergedEntries = Environment.GetEnvironmentVariable("REWIND_NO_MERGED_VTABLE_ENTRIES") != null;
+
+    /// <summary>
+    /// The same as <see cref="MergedObjKlass"/> one step further: each way in computed the address of one entry
+    /// of the object's class ("class + 0x228", the same entry on every way), and the call after the merge reads
+    /// the method and its description through the merged address. That is the object's class, plus the entry's
+    /// offset. Ways that met before count as one, as there.
+    /// </summary>
+    private (SObjKlass Klass, long Offset)? MergedObjKlassEntry(Node phi, int depth = 0)
+    {
+        if (NoMergedEntries || phi.Block == null || phi.In.Length < 2 || depth > 4) return null;
+        var objects = new Node[phi.In.Length];
+        long? past = null;
+        for (int i = 0; i < phi.In.Length; i++)
+        {
+            Node input = phi.In[i];
+            Node obj;
+            long at = 0;
+            if (input.Op == Op.Phi)
+            {
+                if (MergedObjKlassEntry(input, depth + 1) is not ({ } inner, var innerAt)) return null;
+                (obj, at) = (inner.Object, innerAt);
+            }
+            else
+            {
+                Node klass = input;
+                if (input.Op == Op.Add && input.In[1].IsConst)
+                {
+                    klass = input.In[0];
+                    at = IrBuilder.SImm(input.In[1]);
+                }
+                if (!_sem.TryGetValue(klass, out Sem? s) || s is not SObjKlass known) return null;
+                obj = known.Object;
+            }
+            if (past != null && past != at) return null;
+            past = at;
+            objects[i] = obj;
+        }
+        if (past is not { } offset || offset == 0) return null;
+        if (objects.All(o => ReferenceEquals(o, objects[0]))) return (new SObjKlass(objects[0]), offset);
+        foreach (Node other in phi.Block.Phis)
+        {
+            if (ReferenceEquals(other, phi) || other.Dead || other.In.Length != objects.Length || other.Type != VT.I64) continue;
+            bool same = true;
+            for (int i = 0; i < objects.Length && same; i++) same = ReferenceEquals(other.In[i], objects[i]);
+            if (same) return (new SObjKlass(other), offset);
+        }
+        return null;
+    }
 
     /// <summary>
     /// The class of an object, merged from ways in that each read it: the compiler moves the read of the class

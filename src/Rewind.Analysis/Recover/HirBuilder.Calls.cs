@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): float arguments of native calls, slot-specialized invokers, offset-0 field addresses, gaps always marked, small structs as numbers, floating-point negation, inlined compare-exchange on references. See FORK.md.
+// Modified by xob0t (2026): float arguments of native calls, slot-specialized invokers, offset-0 field addresses, gaps always marked, small structs as numbers, floating-point negation, inlined compare-exchange on references, one virtual method through nested merges. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
@@ -1938,6 +1938,45 @@ public sealed partial class HirBuilder
         return ways;
     }
 
+    private static readonly bool NoNestedMergedTargets = Environment.GetEnvironmentVariable("REWIND_NO_NESTED_MERGED_TARGETS") != null;
+
+    /// <summary>
+    /// A merged code pointer some of whose ways in are merges themselves (ways that met before this point), each
+    /// way at the end taking the same virtual method's code from the class of the object it is called on: that
+    /// method, called on that object. (Where the ways pick different methods, only a merge of plain ways is
+    /// taken apart, above.)
+    /// </summary>
+    private MethodDef? OneMergedVirtualTarget(Node phi, Node? callReceiver)
+    {
+        var leaves = new List<Node>();
+        var seen = new HashSet<Node>();
+        bool Collect(Node n, int depth)
+        {
+            if (!seen.Add(n)) return true;
+            if (n.Op != Op.Phi) { leaves.Add(n); return true; }
+            if (depth > 4 || n.In.Length > 16) return false;
+            foreach (Node input in n.In)
+                if (!Collect(input, depth + 1)) return false;
+            return true;
+        }
+        if (!Collect(phi, 0) || leaves.Count < 2 || leaves.Count > 32) return null;
+        MethodDef? only = null;
+        Node? receiver = null;
+        foreach (Node leaf in leaves)
+        {
+            if (Peek(leaf) is not SVTable { MethodInfo: false, Interface: null } vt) return null;
+            TypeSig? receiverType = Peek(vt.Object) is SVal { Type: { } t } ? t : null;
+            if (_castTypes.TryGetValue(vt.Object, out List<TypeSig>? casts) && casts.Count == 1) receiverType = casts[0];
+            MethodDef? method = receiverType != null ? FindVirtual(Declared(receiverType), vt.Slot) : null;
+            if (method == null || method.IsStatic || method.GenericParameters.Length != 0 || method.DeclaringType.GenericParameters.Length != 0) return null;
+            // (One object throughout: the call's receiver is then the object every way read the class of.)
+            if ((only != null && !ReferenceEquals(only, method)) || (receiver != null && !ReferenceEquals(receiver, vt.Object))) return null;
+            only = method;
+            receiver = vt.Object;
+        }
+        return callReceiver != null && ReferenceEquals(callReceiver, receiver) ? only : null;
+    }
+
     /// <summary>
     /// The call of a merged code pointer whose ways in each picked a virtual method: a branch (or a switch) on the
     /// number of the method, each arm calling its method with the call's arguments, all meeting again after it.
@@ -2018,6 +2057,11 @@ public sealed partial class HirBuilder
                     DispatchPhis[targetNode] = ways;
                     DispatchRefined = true;
                 }
+            }
+            else if (!NoNestedMergedTargets && OneMergedVirtualTarget(targetNode, IntAt(call, 0)) is { } only)
+            {
+                BuildCall(call, only, [], [], isVirtual: true, tail, null, skipFirst: false);
+                return;
             }
         }
         Sem target = Eval(targetNode);
