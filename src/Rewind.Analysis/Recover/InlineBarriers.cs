@@ -15,7 +15,8 @@ public sealed partial class Normalizer
     /// That is the runtime's bookkeeping, as the write barrier call is, and goes with its test: a region guarded by
     /// a test of a word at a fixed address of the image's data, that reads and changes memory only at fixed
     /// addresses of that data (changing it at least once at a place found by shifting a value right, a card), and
-    /// that gives nothing to the code after it.
+    /// that gives nothing to the code after it. After a store to a static field the card is that of the class's
+    /// static data, read from the class.
     /// </summary>
     private bool RemoveInlineBarriers()
     {
@@ -132,7 +133,9 @@ public sealed partial class Normalizer
                 switch (n.Op)
                 {
                     case Op.Load:
-                        if (!AtRuntimeData(Resolve(n.In[0]), out _)) return null;
+                        // (Reads may also be of a class's own record: a static field's card is found from the
+                        // class's static data, klass->static_fields.)
+                        if (!AtRuntimeData(Resolve(n.In[0]), out _, classData: true)) return null;
                         break;
                     case Op.Store:
                     {
@@ -201,9 +204,10 @@ public sealed partial class Normalizer
 
     /// <summary>
     /// An address made of a fixed address of the image's data and offsets (or a pointer read from such an address);
-    /// <paramref name="card"/> when an offset is a value shifted right.
+    /// <paramref name="card"/> when an offset is a value shifted right. With <paramref name="classData"/>, a class
+    /// read from its metadata slot is such a base too.
     /// </summary>
-    private bool AtRuntimeData(Node address, out bool card, int depth = 0)
+    private bool AtRuntimeData(Node address, out bool card, int depth = 0, bool classData = false)
     {
         card = false;
         var terms = new List<Node>();
@@ -223,7 +227,8 @@ public sealed partial class Normalizer
         foreach (Node t in terms)
         {
             if (t.IsConst && InRuntimeData((ulong)t.Imm)) based = true;
-            else if (t.Op == Op.Load && depth < 2 && AtRuntimeData(Resolve(t.In[0]), out _, depth + 1)) based = true;
+            else if (classData && t.Op == Op.SlotValue) based = true;
+            else if (t.Op == Op.Load && depth < 2 && AtRuntimeData(Resolve(t.In[0]), out _, depth + 1, classData)) based = true;
             else if (ShiftsRight(t, 0)) card = true;
         }
         return based;
