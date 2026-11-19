@@ -832,6 +832,27 @@ public sealed partial class HirBuilder
 
     private readonly record struct AddressParts(Node? Base, Sem? BaseSem, long Offset, Node? Index, long Scale);
 
+    private static readonly bool NoStringChars = Environment.GetEnvironmentVariable("REWIND_NO_STRING_CHARS") != null;
+
+    /// <summary>
+    /// A character of a string read by index ("s[i]" inlined: the two bytes at the string's first character
+    /// plus twice the index), as the string's indexer reads it. Reads only: a string is not written.
+    /// </summary>
+    private Place? StringChar(HExpr text, TypeSig type, AddressParts a, int size)
+    {
+        if (type.Key != _string.Key || size != 2 || a.Scale != 2 || a.Index == null) return null;
+        FieldSlot? first = null;
+        foreach (FieldSlot slot in _p.Layouts.Of(_string).Fields)
+            if (slot.Type.Key == _char.Key && slot.Size == 2)
+                first = slot;
+        if (first is not { } chars || a.Offset < chars.Offset || (a.Offset - chars.Offset) % 2 != 0) return null;
+        MethodDef? indexer = _string.Definition?.Methods.FirstOrDefault(m => m.Name == "get_Chars" && !m.IsStatic && m.Parameters.Length == 1 &&
+                                                                            m.Parameters[0].Type.Key == _int.Key);
+        if (indexer == null) return null;
+        HExpr index = IndexValue(a.Index, (a.Offset - chars.Offset) / 2);
+        return new PChosenValue(new HCall { Method = indexer, This = text, Arguments = [index], Type = _char });
+    }
+
     private static readonly bool NoChosenFields = Environment.GetEnvironmentVariable("REWIND_NO_CHOSEN_FIELDS") != null;
     private static readonly bool NoFloatPhiBits = Environment.GetEnvironmentVariable("REWIND_NO_FLOAT_PHI_BITS") != null;
 
@@ -1680,6 +1701,7 @@ public sealed partial class HirBuilder
         if (IsReference(type))
         {
             if (a.Index != null && a.Scale > 0 && !NoChosenFields && ChosenField(e, type, a, size) is { } chosen) return chosen;
+            if (a.Index != null && !NoStringChars && StringChar(e, type, a, size) is { } character) return character;
             if (a.Index != null) return new PUnknown($"indexed access into {type.DisplayName}");
             if (a.Offset == 0) return new PObjKlass(a.Base!);
             Place direct = FieldPlace(e, type, (int)a.Offset, size);
