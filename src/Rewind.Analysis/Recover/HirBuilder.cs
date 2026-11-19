@@ -1373,12 +1373,13 @@ public sealed partial class HirBuilder
         if (ReferenceEquals(e.Type, _float))
         {
             if (e is HConst { Value: float f }) return new HConst(BitConverter.SingleToInt32Bits(f), _int);
-            if (SingleBits(e) is { } asInt) return asInt;
+            if ((SingleBits(e) ?? BitCast(e, _int)) is { } asInt) return asInt;
             Problem("float reinterpreted as bits (no BitConverter in this build)");
             return new HOpaque("float_bits", e) { Type = _int };
         }
         if (e is HConst { Value: double d }) return new HConst(BitConverter.DoubleToInt64Bits(d), _long);
         if (BitConverterMethod("DoubleToInt64Bits", _double) is { } toLong) return new HCall { Method = toLong, Arguments = [e], Type = _long };
+        if (BitCast(e, _long) is { } asLong) return asLong;
         Problem("double reinterpreted as bits (no BitConverter in this build)");
         return new HOpaque("double_bits", e) { Type = _long };
     }

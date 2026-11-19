@@ -747,6 +747,18 @@ public sealed class BodyEmitter
                 case HAddressOf addr:
                     Address(addr.Target);
                     return;
+                case HDeref d when d.IsBitCast(out HExpr bits) && bits is not (HLocal or HArg):
+                {
+                    // Bits read as another type: from a local of their own (in C# the address of a local needs
+                    // no pinning, that of a field or an element would).
+                    var temp = new VariableDefinition(Ref(bits.Type));
+                    _body.Variables.Add(temp);
+                    Value(bits);
+                    _il.Emit(OpCodes.Stloc, temp);
+                    _il.Emit(OpCodes.Ldloca, temp);
+                    _il.Emit(OpCodes.Ldobj, Ref(d.Type));
+                    return;
+                }
                 case HDeref d:
                     Value(d.Pointer);
                     _il.Emit(OpCodes.Ldobj, Ref(d.Type));

@@ -84,6 +84,23 @@ public sealed class HAddressOf(HExpr target) : HExpr
 public sealed class HDeref(HExpr pointer) : HExpr
 {
     public HExpr Pointer = pointer;
+
+    /// <summary>
+    /// Whether this reads a value's own memory as another number of the same size ("*(double*)&amp;bits", the
+    /// reinterpretation where the class library has no BitConverter call for it); <paramref name="original"/> is
+    /// the value.
+    /// </summary>
+    public bool IsBitCast(out HExpr original)
+    {
+        original = this;
+        if (Pointer is not HAddressOf { Target: { } target } || target.Type is not PrimitiveSig from || Type is not PrimitiveSig to || ReferenceEquals(from, to))
+            return false;
+        static bool Number(PrimitiveSig p) => p.Element is Il2CppTypeEnum.I4 or Il2CppTypeEnum.U4 or Il2CppTypeEnum.I8 or Il2CppTypeEnum.U8 or Il2CppTypeEnum.R4 or Il2CppTypeEnum.R8;
+        static bool Wide(PrimitiveSig p) => p.Element is Il2CppTypeEnum.I8 or Il2CppTypeEnum.U8 or Il2CppTypeEnum.R8;
+        if (!Number(from) || !Number(to) || Wide(from) != Wide(to)) return false;
+        original = target;
+        return true;
+    }
 }
 
 public sealed class HUnary(HUnaryOp op, HExpr operand) : HExpr
