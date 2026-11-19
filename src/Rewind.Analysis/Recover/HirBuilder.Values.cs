@@ -960,7 +960,7 @@ public sealed partial class HirBuilder
         foreach (var (node, scale) in terms)
         {
             if (scale != 1) continue;
-            Sem s = Eval(node);
+            Sem s = node.Op == Op.Phi && MergedObjKlass(node) is { } merged ? merged : Eval(node);
             if (!IsPointerLike(s) && !(s is SVal { Type: { } wrapper } && IsReferenceWrapper(wrapper))) continue;
             baseNode = node;
             baseSem = s;
@@ -1014,6 +1014,41 @@ public sealed partial class HirBuilder
             _combinedIndexes[address] = sum;
         }
         return sum == null ? parts : new AddressParts(baseNode, baseSem, offset, sum, unit);
+    }
+
+    private static readonly bool NoMergedKlass = Environment.GetEnvironmentVariable("REWIND_NO_MERGED_KLASS") != null;
+
+    /// <summary>
+    /// The class of an object, merged from ways in that each read it: the compiler moves the read of the class
+    /// pointer of a virtual call into the code before the point where several ways meet, and the call after it
+    /// takes its method from the merged pointer. Where every way in read the class of the same object, it is
+    /// that object's class; where each read the class of the object another merged value is given on the same
+    /// way in (the receiver, merged alongside), it is the class of that merged value. Only ways in already
+    /// translated are looked at; the merged value itself is not read (its copies go, see SettlePhis). Ways in
+    /// that met before (a merge of such merges) count as one.
+    /// </summary>
+    private SObjKlass? MergedObjKlass(Node phi, int depth = 0)
+    {
+        if (NoMergedKlass || phi.Block == null || phi.In.Length < 2 || depth > 4) return null;
+        var objects = new Node[phi.In.Length];
+        for (int i = 0; i < phi.In.Length; i++)
+        {
+            Node input = phi.In[i];
+            // (A way in that is itself such a merge: ways that met before this point.)
+            SObjKlass? klass = input.Op == Op.Phi ? MergedObjKlass(input, depth + 1)
+                : _sem.TryGetValue(input, out Sem? s) ? s as SObjKlass : null;
+            if (klass == null) return null;
+            objects[i] = klass.Object;
+        }
+        if (objects.All(o => ReferenceEquals(o, objects[0]))) return new SObjKlass(objects[0]);
+        foreach (Node other in phi.Block.Phis)
+        {
+            if (ReferenceEquals(other, phi) || other.Dead || other.In.Length != objects.Length || other.Type != VT.I64) continue;
+            bool same = true;
+            for (int i = 0; i < objects.Length && same; i++) same = ReferenceEquals(other.In[i], objects[i]);
+            if (same) return new SObjKlass(other);
+        }
+        return null;
     }
 
     private static long Gcd(long a, long b)

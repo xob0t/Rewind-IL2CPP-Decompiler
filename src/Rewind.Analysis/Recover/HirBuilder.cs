@@ -592,7 +592,10 @@ public sealed partial class HirBuilder
             while (work.Count > 0)
             {
                 Node phi = work.Dequeue();
-                if (!settled.Add(phi) || !_phiInputs.TryGetValue(phi, out List<Node>? inputs)) continue;
+                if (!settled.Add(phi)) continue;
+                // (What its copies could not say counts now: see PhiCopies.)
+                Release(phi);
+                if (!_phiInputs.TryGetValue(phi, out List<Node>? inputs)) continue;
                 foreach (Node input in inputs)
                 {
                     if (input.Op == Op.Phi) _phiRead.Add(input);
@@ -1237,6 +1240,10 @@ public sealed partial class HirBuilder
             {
                 s = Eval(input);
                 if (s is SJunk) continue;
+                // What cannot be said about the value as the merged value's copy (a class pointer is no data) is
+                // held with the merged value: it counts when that is read, not when the value itself is used
+                // for what it is (the class's methods read through it, the merge given back to each way in).
+                if (!NoCopyProblemsOnPhi) _peekSubject = phi;
                 value = Value(input);
             }
             finally
@@ -1290,6 +1297,8 @@ public sealed partial class HirBuilder
         if (value.Type != VT.I64) return false;
         return ReferenceEquals(to, from.Succs[cond.Op == Op.CmpEq ? 0 : 1]);
     }
+
+    private static readonly bool NoCopyProblemsOnPhi = Environment.GetEnvironmentVariable("REWIND_NO_COPY_PROBLEMS_ON_PHI") != null;
 
     private readonly Dictionary<HVar, Node> _phiOfVar = [];
     /// <summary>The nearest common type of the references each merged value was given in this build.</summary>
