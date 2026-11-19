@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): byte-indexed two-level jump tables. See FORK.md.
 using Iced.Intel;
 using Rewind.Binary;
 
@@ -13,6 +14,10 @@ public sealed class RawBlock
     public BlockEnd End;
     /// <summary>Successor addresses. For Branch: [taken, fall-through]. For Switch: one per table entry.</summary>
     public List<ulong> Successors = [];
+    /// <summary>For Switch through a byte-indexed table: the address of the byte table (0 for a one-level table).</summary>
+    public ulong SwitchByteTable;
+    /// <summary>For Switch through a byte-indexed table: the address of the table of targets it indexes.</summary>
+    public ulong SwitchTable;
     public ulong EndAddress => Instructions.Count == 0 ? Start : Instructions[^1].NextIP;
 }
 
@@ -64,6 +69,7 @@ public sealed class X64Cfg
         var instructions = new SortedDictionary<ulong, Instruction>();
         var leaders = new HashSet<ulong> { start };
         var ends = new Dictionary<ulong, (BlockEnd End, List<ulong> Successors)>();
+        var byteTables = new Dictionary<ulong, (ulong Bytes, ulong Table)>();
         var work = new Stack<ulong>();
         if (extraLeaders != null)
             foreach (ulong leader in extraLeaders)
@@ -151,7 +157,8 @@ public sealed class X64Cfg
                     }
                     case FlowControl.IndirectBranch:
                     {
-                        List<ulong>? table = TryReadJumpTable(image, instructions, ip, start, limit);
+                        List<ulong>? table = TryReadJumpTable(image, instructions, ip, start, limit, out ulong bytesAt, out ulong tableAt);
+                        if (table != null && bytesAt != 0) byteTables[ip] = (bytesAt, tableAt);
                         if (table == null)
                         {
                             ends[ip] = (BlockEnd.IndirectTailCall, []);
@@ -226,6 +233,7 @@ public sealed class X64Cfg
             {
                 current.End = end.End;
                 current.Successors = end.Successors;
+                if (byteTables.TryGetValue(address, out var two)) (current.SwitchByteTable, current.SwitchTable) = two;
                 cfg.Blocks.Add(current);
                 current = null;
             }
@@ -248,14 +256,23 @@ public sealed class X64Cfg
         return cfg;
     }
 
+    /// <summary>Off (REWIND_NO_BYTE_JUMP_TABLES): a switch through a byte table of case indexes stays an indirect jump.</summary>
+    private static readonly bool NoByteTables = Environment.GetEnvironmentVariable("REWIND_NO_BYTE_JUMP_TABLES") != null;
+
     /// <summary>
     /// Recognizes the MSVC jump table idiom ending in "jmp reg":
     ///   lea base, [image base] ... mov r32, [base + index*4 + tableRva] ; add r, base ; jmp r
     /// and returns the table's targets. Returns null when the indirect jump is not such a table.
+    /// A switch whose cases share few bodies has two tables: a byte per case value giving the index into the table
+    /// of targets, "movzx index, byte [base + value + bytesRva]" before the load. Its targets are returned per case
+    /// value, and <paramref name="bytesAt"/> and <paramref name="tableAt"/> give the two tables' addresses (0 for a
+    /// one-level table).
     /// </summary>
     private static List<ulong>? TryReadJumpTable(NativeImage image, SortedDictionary<ulong, Instruction> decoded,
-        ulong jumpAddress, ulong start, ulong limit)
+        ulong jumpAddress, ulong start, ulong limit, out ulong bytesAt, out ulong tableAt)
     {
+        bytesAt = 0;
+        tableAt = 0;
         Instruction jump = decoded[jumpAddress];
         if (jump.Op0Kind != OpKind.Register) return null;
         Register target = jump.Op0Register;
@@ -273,6 +290,7 @@ public sealed class X64Cfg
         bool found = false;
         int entrySize = 4;
         ulong imageBase = image.ImageBase;
+        int loadAt = -1;
         for (int i = 0; i < previous.Count; i++)
         {
             Instruction ins = previous[i];
@@ -282,6 +300,7 @@ public sealed class X64Cfg
             {
                 tableRva = ins.MemoryDisplacement64;
                 found = true;
+                loadAt = i;
                 break;
             }
             // Any other write to the target register before we find the table load defeats the pattern,
@@ -295,6 +314,25 @@ public sealed class X64Cfg
         ulong table = imageBase + tableRva;
         if (!image.IsMapped(table, entrySize)) return null;
 
+        // The table load's index comes from a byte table: the last write of the index register before the load is
+        // "movzx index32, byte [base + value + bytesRva]" (base and value in either order, unscaled).
+        ulong bytes = 0;
+        if (!NoByteTables)
+        {
+            Register slot = previous[loadAt].MemoryIndex.GetFullRegister();
+            for (int i = loadAt + 1; i < previous.Count; i++)
+            {
+                Instruction ins = previous[i];
+                if (ins.Op0Kind != OpKind.Register || ins.Op0Register.GetFullRegister() != slot ||
+                    ins.Mnemonic is Mnemonic.Cmp or Mnemonic.Test) continue;
+                if (ins.Mnemonic == Mnemonic.Movzx && ins.Op1Kind == OpKind.Memory && ins.MemorySize == MemorySize.UInt8 &&
+                    ins.MemoryBase != Register.None && ins.MemoryIndex != Register.None && ins.MemoryIndexScale == 1 &&
+                    ins.MemorySegment == Register.DS)
+                    bytes = imageBase + ins.MemoryDisplacement64;
+                break;
+            }
+        }
+
         // The bound comes from a preceding "cmp index, n ; ja default"; when it cannot be found, read entries
         // while they keep pointing into this function.
         int bound = -1;
@@ -306,6 +344,24 @@ public sealed class X64Cfg
                 bound = (int)ins.GetImmediate(1) + 1;
                 break;
             }
+        }
+
+        if (bytes != 0)
+        {
+            // The bound is the number of case values: one byte each, every byte an index of a target in the function.
+            if (bound <= 0 || bound > 4096 || !image.IsMapped(bytes, bound)) return null;
+            var cases = new List<ulong>(bound);
+            for (int i = 0; i < bound; i++)
+            {
+                ulong slotAt = table + (ulong)(image.U8(bytes + (ulong)i) * entrySize);
+                if (!image.IsMapped(slotAt, entrySize)) return null;
+                ulong entry = imageBase + image.U32(slotAt);
+                if (entry < start || entry >= limit) return null;
+                cases.Add(entry);
+            }
+            bytesAt = bytes;
+            tableAt = table;
+            return cases;
         }
 
         var targets = new List<ulong>();

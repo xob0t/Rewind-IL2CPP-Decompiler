@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): stack arguments of calls to targets not yet known. See FORK.md.
+// Modified by xob0t (2026): stack arguments of calls to targets not yet known, switches through byte-indexed jump tables, jump-table registers dead after the jump. See FORK.md.
 using Iced.Intel;
 using Rewind.Analysis.Ir;
 using Rewind.Binary;
@@ -209,7 +209,8 @@ public sealed class X64Lifter : IMachineLifter
                 }
                 if (from < raw.Instructions.Count)
                 {
-                    var rest = new RawBlock { Start = raw.Instructions[from].IP, End = raw.End, Successors = raw.Successors };
+                    var rest = new RawBlock { Start = raw.Instructions[from].IP, End = raw.End, Successors = raw.Successors,
+                        SwitchByteTable = raw.SwitchByteTable, SwitchTable = raw.SwitchTable };
                     rest.Instructions.AddRange(raw.Instructions.GetRange(from, raw.Instructions.Count - from));
                     Block block = Make(rest);
                     tails.Add((block, rest));
@@ -1455,12 +1456,18 @@ public sealed class X64Lifter : IMachineLifter
                 // The index is whatever the table load was indexed by; recover it from the jump's operand
                 // expression: target = imageBase + load32(imageBase + rva + index * 4).
                 Node target = ReadOp(ins, 0, VT.I64);
-                Node? index = FindSwitchIndex(target);
+                Node? index = raw.SwitchByteTable != 0
+                    ? FindByteSwitchIndex(target, raw.SwitchByteTable - _image.ImageBase, raw.SwitchTable - _image.ImageBase)
+                    : FindSwitchIndex(target);
                 if (index == null)
                 {
                     _fn.Problems.Add($"jump table index not recovered at 0x{ins.IP:X}");
                     index = _b.Undef(VT.I64);
                 }
+                // The jump's register holds a code address in every case, which no C# value is: left as it is, it
+                // turns up as an argument register of a call whose arity is not known yet and keeps the table load
+                // alive as an opaque statement.
+                if (!KeepJumpTargets && ins.Op0Kind == OpKind.Register) WriteReg(ins.Op0Register, _b.Undef(VT.I64));
                 Node sw = _b.Raw(Op.Switch, VT.None, index);
                 sw.Aux = new List<Block>(block.Succs);
                 return true;
@@ -1483,6 +1490,79 @@ public sealed class X64Lifter : IMachineLifter
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// The case value of a switch through a byte table: target = imageBase + load32(imageBase + tableRva + 4 *
+    /// zext(load8(imageBase + bytesRva + value))). The image base is a constant or a value (the "lea base, [rip - x]"
+    /// of another block); whatever the outer address adds besides the slot is the image base plus tableRva, so the
+    /// byte's address less that, less bytesRva and plus tableRva is the value. The builder folds constants together
+    /// ("value - 1 + bytesRva" is one constant), which is why the constants are worked out instead of matched.
+    /// </summary>
+    /// <summary>Off (REWIND_NO_DEAD_JUMP_TARGETS): the register a jump table jumps through keeps the target after the jump.</summary>
+    private static readonly bool KeepJumpTargets = Environment.GetEnvironmentVariable("REWIND_NO_DEAD_JUMP_TARGETS") != null;
+
+    private Node? FindByteSwitchIndex(Node target, ulong bytesRva, ulong tableRva)
+    {
+        var pending = new Stack<Node>();
+        pending.Push(target);
+        int budget = 32;
+        Node? load = null;
+        while (pending.Count > 0 && budget-- > 0)
+        {
+            Node n = pending.Pop();
+            if (n.Op == Op.Load && n.Type == VT.I32)
+            {
+                load = n;
+                break;
+            }
+            foreach (Node input in n.In) pending.Push(input);
+        }
+        if (load == null) return null;
+
+        var outer = new List<Node>();
+        if (!AddTerms(load.In[0], outer, out long outerConst)) return null;
+        int scaled = outer.FindIndex(t => t.Op == Op.Mul && t.In[1].IsConstValue(4) || t.Op == Op.Shl && t.In[1].IsConstValue(2));
+        if (scaled < 0) return null;
+        Node slot = outer[scaled].In[0];
+        outer.RemoveAt(scaled);
+        while (slot.Op is Op.ZExt or Op.SExt) slot = slot.In[0];
+        if (slot.Op != Op.Load || slot.Type != VT.I8) return null;
+
+        var inner = new List<Node>();
+        if (!AddTerms(slot.In[0], inner, out long innerConst)) return null;
+        foreach (Node b in outer)
+        {
+            int at = inner.IndexOf(b);
+            if (at < 0) return null;
+            inner.RemoveAt(at);
+        }
+        if (inner.Count != 1) return null;
+        long delta = innerConst - outerConst + (long)tableRva - (long)bytesRva;
+        Node value = inner[0];
+        return delta == 0 ? value : _b.Add(value, _b.Const(value.Type, delta));
+    }
+
+    /// <summary>Splits a sum into its terms that are not constants and the sum of those that are.</summary>
+    private static bool AddTerms(Node sum, List<Node> terms, out long constant)
+    {
+        constant = 0;
+        var pending = new Stack<Node>();
+        pending.Push(sum);
+        int budget = 16;
+        while (pending.Count > 0)
+        {
+            if (budget-- <= 0) return false;
+            Node t = pending.Pop();
+            if (t.Op == Op.Add)
+            {
+                pending.Push(t.In[1]);
+                pending.Push(t.In[0]);
+            }
+            else if (t.IsConst) constant += t.Imm;
+            else terms.Add(t);
+        }
+        return true;
     }
 
     private static Node? FindSwitchIndex(Node target)
