@@ -101,12 +101,19 @@ public static class HelperDiscovery
         if (best == null) return new DiscoveredHelpers(new RuntimeHelpers(), context, "none (no signature library for this platform)", 0, false);
         if (AddImportStubs(image, best.Helpers) > 0)
             best = best with { Kinds = best.Helpers.ByAddress.Values.Select(i => i.Kind).Distinct().Count() };
-        // What no library recognized, the compiled methods may show by the way they call it.
-        if (HelperRoles.Identify(model, context, index, best.Helpers) is { } found)
-        {
-            log(found);
-            best = best with { Kinds = best.Helpers.ByAddress.Values.Select(i => i.Kind).Distinct().Count() };
-        }
-        return best;
+        foreach (string found in Complete(model, context, index, best.Helpers)) log(found);
+        return best with { Kinds = best.Helpers.ByAddress.Values.Select(i => i.Kind).Distinct().Count() };
+    }
+
+    /// <summary>
+    /// What the signature library did not recognize, found another way: by the code of the function itself, and by
+    /// the way the compiled methods call it. Returns lines for the log.
+    /// </summary>
+    public static List<string> Complete(Il2CppModel model, ModelCodeContext context, CodeIndex index, RuntimeHelpers helpers)
+    {
+        var lines = new List<string>();
+        if (HelperShapes.Identify(model, context, index, helpers) is { } shapes) lines.Add(shapes);
+        if (HelperRoles.Identify(model, context, index, helpers) is { } roles) lines.Add(roles);
+        return lines;
     }
 }
