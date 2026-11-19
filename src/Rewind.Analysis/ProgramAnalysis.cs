@@ -32,6 +32,25 @@ public sealed class ProgramAnalysis
 
     private readonly Dictionary<ulong, CallShape?> _shapes = [];
 
+    private static readonly bool NoSlotInvokers = Environment.GetEnvironmentVariable("REWIND_NO_SLOT_INVOKERS") != null;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, SlotInvoker?> _slotInvokers = new();
+
+    /// <summary>
+    /// The function at <paramref name="address"/> when it is an invoker specialized for one slot of the class's
+    /// table (see SlotInvoker): only for a function no table or library names, and under the Windows x64
+    /// convention, which numbers integer and floating point arguments in one sequence.
+    /// </summary>
+    public SlotInvoker? SlotInvokerAt(ulong address)
+    {
+        if (NoSlotInvokers || address == 0 || Model.Image.Arch != Rewind.Binary.CpuArch.X64 || !Abi.Regs.SharedPositions) return null;
+        return _slotInvokers.GetOrAdd(address, at =>
+        {
+            CallTarget target = Resolve(at);
+            if (target.IsManaged || target.Helper != null || Helpers.At(at) != null) return null;
+            return SlotInvoker.Recognize(Context, Klass, at);
+        });
+    }
+
     /// <summary>
     /// Native functions that implement managed "extern" methods, found from the binary itself: the wrapper
     /// IL2CPP generates for an internal call does nothing but hand its arguments to the implementation, so
@@ -773,6 +792,14 @@ public sealed class ProgramAnalysis
                     Count = shape.Count - 1, IsFloat = shape.IsFloat, IsDouble = shape.IsDouble, Returns = shape.Returns,
                     Slots = shape.Slots?.Take(shape.Slots.Count - 1).ToList(), IntResults = shape.IntResults, FloatResults = shape.FloatResults,
                 };
+        }
+        // An invoker made for one slot: its own arguments, of the kinds it reads them as. What it returns is
+        // the method's, which depends on the object it is called on.
+        if (shape == null && helper == null && SlotInvokerAt(address) is { } invoker)
+        {
+            int count = Math.Max(4, invoker.Count);
+            shape = new CallShape { Count = invoker.Count, IsFloat = new bool[count], IsDouble = new bool[count], Returns = CallReturn.Unknown };
+            for (int k = 0; k < 4; k++) shape.IsFloat[k] = shape.IsDouble[k] = invoker.FloatIn[k];
         }
         if (shape != null && shape.Slots == null && !Abi.Regs.SharedPositions) shape = SeparateCounters(shape);
         _shapes[address] = shape;

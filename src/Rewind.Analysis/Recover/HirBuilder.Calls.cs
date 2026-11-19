@@ -623,6 +623,11 @@ public sealed partial class HirBuilder
             EmitHelperCall(call, invoker, tail);
             return;
         }
+        if (!target.IsManaged && target.Helper == null && _p.SlotInvokerAt(info.Target) is { } slotInvoker)
+        {
+            EmitSlotInvokerCall(call, slotInvoker, info.Target, tail);
+            return;
+        }
         if (!target.IsManaged && target.Helper == null && !NoNamedCopies && NamedCopy(call, info.Target) is { } named) target = named;
         if (target.IsManaged)
         {
@@ -650,6 +655,127 @@ public sealed partial class HirBuilder
         }
         FinishCall(call, new HOpaque($"native_0x{info.Target:X}", args.ToArray()) { Type = _long }, info.NoReturn ? ReturnKind.Void : ReturnKind.Integer, _long, tail);
         if (info.NoReturn) Emit(new HThrow(new HOpaque("noreturn")), call.Addr);
+    }
+
+    /// <summary>
+    /// A call of an invoker made for one slot of the class's table (see SlotInvoker): the virtual method in that
+    /// slot of the object's class, called on the object with the invoker's arguments moved down one position,
+    /// or with the constants the invoker writes in. Where the method or how its arguments arrive is not
+    /// recovered, the gap says so and names what is known: the slot and the object.
+    /// </summary>
+    private void EmitSlotInvokerCall(Node call, Rewind.Analysis.Runtime.SlotInvoker invoker, ulong address, bool tail)
+    {
+        Node? objectNode = IntAt(call, 1);
+        string why;
+        if (objectNode != null)
+        {
+            HExpr receiver = Value(objectNode);
+            TypeSig? receiverType = receiver.Type;
+            if (_castTypes.TryGetValue(objectNode, out List<TypeSig>? casts) && casts.Count == 1) receiverType = casts[0];
+            if (receiverType != null) receiverType = Declared(receiverType);
+            MethodDef? method = FindVirtual(receiverType, invoker.Slot);
+            if (method == null) why = $"virtual slot {invoker.Slot} not found on {receiverType?.DisplayName ?? "unknown type"}";
+            else
+            {
+                TypeSig[] classArgs = receiverType is GenericInstSig g && ReferenceEquals(g.Definition, method.DeclaringType) ? g.Arguments : [];
+                MethodAbi abi = _p.Abi.For(method, classArgs, []);
+                if (SlotInvokerConstants(invoker, abi, out why) is { } constants)
+                {
+                    BuildCall(call, method, classArgs, [], isVirtual: true, tail, null, skipFirst: false, receiverOverride: objectNode, shift: 1,
+                        fixedArguments: constants);
+                    return;
+                }
+                why = $"how {method.DeclaringType.Name}.{method.Name} is handed its arguments: {why}";
+            }
+        }
+        else why = "object not captured";
+        Problem($"call through vtable slot {invoker.Slot} (invoker 0x{address:X}) not recovered: {why}");
+        // (Only the object is known for certain; the other values the invoker was handed are not shown.)
+        HExpr[] known = objectNode != null ? [Value(objectNode)] : [];
+        FinishCall(call, new HOpaque($"virtual_slot{invoker.Slot}_arguments_unknown", known) { Type = _long }, ReturnKind.Integer, _long, tail);
+    }
+
+    /// <summary>
+    /// Whether the method's arguments arrive the way the invoker hands them on: each from the invoker's own
+    /// argument one position further on, of the same kind, or as a constant it writes in (returned, by
+    /// position); its method record right after them. Null, with the reason, when they do not.
+    /// </summary>
+    private Dictionary<int, long>? SlotInvokerConstants(Rewind.Analysis.Runtime.SlotInvoker invoker, MethodAbi abi, out string why)
+    {
+        var constants = new Dictionary<int, long>();
+        why = "";
+        if (!abi.Known)
+        {
+            why = "signature not known";
+            return null;
+        }
+        int last = -1;
+        foreach (AbiParam p in abi.Params)
+        {
+            last = Math.Max(last, p.Position);
+            switch (p.Role)
+            {
+                case ParamRole.MethodInfo:
+                    if (p.Position != invoker.MethodInfoPosition)
+                    {
+                        why = "a different number of arguments";
+                        return null;
+                    }
+                    continue;
+                case ParamRole.This:
+                case ParamRole.Argument:
+                {
+                    if (p.Position >= invoker.MethodInfoPosition)
+                    {
+                        why = "a different number of arguments";
+                        return null;
+                    }
+                    if (p.Pass is not (PassKind.Integer or PassKind.Float or PassKind.Indirect))
+                    {
+                        why = "an argument passed in parts";
+                        return null;
+                    }
+                    bool inFloat = p.Pass == PassKind.Float && p.Position < 4;
+                    Rewind.Analysis.Runtime.InvokerSource? source = inFloat ? invoker.FloatSources[p.Position] : invoker.IntSources[p.Position];
+                    if (source is not { } s)
+                    {
+                        why = $"argument {p.Position} not handed on";
+                        return null;
+                    }
+                    if (s.IsConstant)
+                    {
+                        if (p.Role == ParamRole.This || p.Pass == PassKind.Indirect || IsStructType(p.Type) || (IsReference(p.Type) && s.Constant != 0))
+                        {
+                            why = $"argument {p.Position} a constant of no such type";
+                            return null;
+                        }
+                        constants[p.Position] = s.Constant;
+                        continue;
+                    }
+                    if (s.Position != p.Position + 1)
+                    {
+                        why = $"argument {p.Position} not the invoker's next";
+                        return null;
+                    }
+                    // (Of the same kind: the invoker's own argument arrived where the method's goes.)
+                    if (s.Position < 4 && invoker.FloatIn[s.Position] != (p.Pass == PassKind.Float))
+                    {
+                        why = $"argument {p.Position} of another kind";
+                        return null;
+                    }
+                    continue;
+                }
+                default:
+                    why = $"a {p.Role} argument";
+                    return null;
+            }
+        }
+        if (last != invoker.MethodInfoPosition)
+        {
+            why = "a different number of arguments";
+            return null;
+        }
+        return constants;
     }
 
     private void EmitIntrinsic(Node call, CallInfo info)
@@ -1410,7 +1536,8 @@ public sealed partial class HirBuilder
     /// not ones that something else told.
     /// </summary>
     private void BuildCall(Node call, MethodDef method, TypeSig[] classArgs, TypeSig[] methodArgs, bool isVirtual, bool tail,
-        List<MethodDef>? alternatives, bool skipFirst, Node? receiverOverride = null, int shift = 0, bool listed = false, bool bufferFirst = false)
+        List<MethodDef>? alternatives, bool skipFirst, Node? receiverOverride = null, int shift = 0, bool listed = false, bool bufferFirst = false,
+        IReadOnlyDictionary<int, long>? fixedArguments = null)
     {
         MethodAbi abi = _p.Abi.For(method, classArgs, methodArgs);
         bool classTold = false, methodTold = false;
@@ -1526,7 +1653,10 @@ public sealed partial class HirBuilder
                 {
                     TypeSig type = p.Type!;
                     HExpr arg;
-                    if (p.Pass == PassKind.Float) arg = FloatAt(call, position, p.IsDouble);
+                    // A value the code called through writes in itself (the same at every call).
+                    if (fixedArguments != null && fixedArguments.TryGetValue(p.Position, out long bits))
+                        arg = ValueFromBits(new HConst(bits, _long), type, Math.Max(1, _p.Layouts.SizeOf(type).Size));
+                    else if (p.Pass == PassKind.Float) arg = FloatAt(call, position, p.IsDouble);
                     else if (p.Pass is PassKind.IntegerPair or PassKind.FloatAggregate)
                     {
                         List<Node?> registers = ArgumentRegisters(call, p, position, out Carried how);
