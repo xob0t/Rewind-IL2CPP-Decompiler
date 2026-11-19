@@ -310,6 +310,7 @@ public sealed partial class HirBuilder
         }
 
         if (n.Op is Op.Xor or Op.And && SignOperation(n) is { } signed) return new SVal(signed);
+        if (n.Op == Op.Mul && ObjectHash(n) is { } hash) return new SVal(hash);
 
         // Values that travel together, moved down by whole bytes: the ones that lay above are what is left.
         if (n.Op == Op.ShrU && n.Type == VT.I64 && n.In[1].IsConst && n.In[1].UImm is > 0 and < 64 && n.In[1].UImm % 8 == 0 && !n.In[0].IsConst &&
@@ -359,6 +360,12 @@ public sealed partial class HirBuilder
             }
             return new SVal(new HBinary(op, left, right) { Type = _bool });
         }
+        // A reference is no number: arithmetic on one (other than the idioms above) is marked.
+        if (!NoReferenceArithmetic && (IsReference(left.Type) || IsReference(right.Type)))
+        {
+            Problem(ReferenceArithmetic);
+            return new SVal(Site(new HOpaque("reference_arithmetic", new HBinary(op, left, right) { Type = TypeForBits(n.Type) }) { Type = TypeForBits(n.Type) }, ReferenceArithmetic));
+        }
         TypeSig type = isShift ? ResultIntType(n, n.In[0]) : ResultIntType(n, n.In[0], n.In[1]);
         if (n.Op is Op.DivU or Op.RemU or Op.ShrU && ReferenceEquals(type, _int)) type = _uint;
         if (n.Op is Op.DivU or Op.RemU or Op.ShrU && ReferenceEquals(type, _long)) type = _ulong;
@@ -388,6 +395,38 @@ public sealed partial class HirBuilder
             if (left is HConst { Value: int or long } nothing && Convert.ToInt64(nothing.Value) == 0 && op is HBinaryOp.Or or HBinaryOp.Xor or HBinaryOp.Add && right is not HConst) return new SVal(right);
         }
         return new SVal(new HBinary(op, left, right) { Type = type });
+    }
+
+    private static readonly bool NoReferenceArithmetic = Environment.GetEnvironmentVariable("REWIND_NO_REFERENCE_ARITHMETIC") != null;
+    private static readonly bool NoObjectHash = Environment.GetEnvironmentVariable("REWIND_NO_OBJECT_HASH") != null;
+    internal const string ReferenceArithmetic = "a reference used as a number";
+
+    /// <summary>
+    /// The runtime's hash of an object - what object.GetHashCode and RuntimeHelpers.GetHashCode give - pasted in:
+    /// the object's address moved down by 3 and multiplied by 2654435761 (Knuth's multiplicative hash), in 32
+    /// bits. On "this" it is "base.GetHashCode()" of object (a direct call of object's method); on another
+    /// object RuntimeHelpers.GetHashCode(o). Null for anything else.
+    /// </summary>
+    private HExpr? ObjectHash(Node n)
+    {
+        if (NoObjectHash || n.Type != VT.I32 || !n.In[1].IsConst || (uint)n.In[1].UImm != 0x9E3779B1u) return null;
+        Node shifted = n.In[0];
+        while (shifted.Op is Op.Trunc or Op.ZExt or Op.SExt) shifted = shifted.In[0];
+        if (shifted.Op != Op.ShrU || !shifted.In[1].IsConstValue(3)) return null;
+        Node address = shifted.In[0];
+        while (address.Op is Op.Trunc or Op.ZExt or Op.SExt) address = address.In[0];
+        HExpr obj = Value(address);
+        if (!IsReference(obj.Type)) return null;
+        if (obj is HArg { Index: < 0 } && !_method.DeclaringType.IsValueType &&
+            _m.FindType("System.Object")?.Methods.FirstOrDefault(m => m.Name == "GetHashCode" && !m.IsStatic && m.Parameters.Length == 0) is { } own &&
+            !ReferenceEquals(own, _method))
+            return new HCall { Method = own, This = obj, Virtual = false, Type = _int };
+        // (Not in the method that is the hash itself: there it would call itself.)
+        if (_m.FindType("System.Runtime.CompilerServices.RuntimeHelpers")?.Methods.FirstOrDefault(m =>
+                m.Name == "GetHashCode" && m.IsStatic && m.Parameters.Length == 1 && m.Parameters[0].Type is PrimitiveSig { Element: Il2CppTypeEnum.Object }) is { } helper &&
+            !ReferenceEquals(helper, _method))
+            return new HCall { Method = helper, Arguments = [obj], Type = _int };
+        return null;
     }
 
     /// <summary>
