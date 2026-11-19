@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns, long stack slots that held a reference and a number, struct addresses typed as their target. See FORK.md.
+// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns, long stack slots that held a reference and a number, struct addresses typed as their target, merged statics pointers. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
@@ -1205,6 +1205,13 @@ public sealed partial class HirBuilder
                 _sem[phi] = boundSem;
                 continue;
             }
+            // One class's static data whichever way in: the compiler merged the paths after each read the
+            // pointer (tail merging), and the field reads after the merge are of that class's statics.
+            if (!NoMergedStatics && MergedStatics(phi) is { } statics)
+            {
+                _sem[phi] = statics;
+                continue;
+            }
             // The address of one stack object or another, by the way in: a reference variable.
             if (MergedPointee(phi) is { } pointee)
             {
@@ -1237,6 +1244,28 @@ public sealed partial class HirBuilder
             _sem[phi] = new SVal(new HLocal(variable) { Type = type });
             if (type != null) PhiTypes[phi] = type;
         }
+    }
+
+    private static readonly bool NoMergedStatics = Environment.GetEnvironmentVariable("REWIND_NO_MERGED_STATICS") != null;
+
+    /// <summary>The static data of one class, when every way into the merge gives that pointer; null otherwise.</summary>
+    private SStatics? MergedStatics(Node phi)
+    {
+        SStatics? found = null;
+        foreach (Node input in phi.In)
+        {
+            if (ReferenceEquals(input, phi)) continue;
+            // (Only a read of a class's static data pointer is looked at here, before the blocks are built: the
+            // class, a constant of the image, and the offset of its static data.)
+            Sem? s = input.Op == Op.Phi ? _sem.GetValueOrDefault(input)
+                : input.Op == Op.Load && input.In[0] is { Op: Op.Add } address && address.In[1].IsConst &&
+                  address.In[1].Imm == _p.Klass.StaticFields && address.In[0].Op is Op.SlotValue or Op.Load &&
+                  Peek(address.In[0]) is SKlass klass ? new SStatics(klass.Type) : null;
+            if (s is not SStatics statics) return null;
+            if (found == null) found = statics;
+            else if (found.Type.Key != statics.Type.Key) return null;
+        }
+        return found;
     }
 
     /// <summary>Assignments that give a successor's merged values their value along the edge from this block.</summary>
