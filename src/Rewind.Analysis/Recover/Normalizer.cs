@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): floating-point negation. See FORK.md.
+// Modified by xob0t (2026): floating-point negation, engine-method lookups merged from several paths. See FORK.md.
 using Rewind.Model;
 using Rewind.Analysis.Ir;
 using Rewind.Analysis.Passes;
@@ -949,7 +949,7 @@ public sealed partial class Normalizer(ProgramAnalysis program)
         var statics = new Dictionary<ulong, Node>();
         foreach (Block b in _fn.Blocks)
             foreach (Node n in b.Nodes)
-                if (n.Op == Op.Store && n.In[0].IsConst && resolved.TryGetValue(n.In[1], out Node? idiom))
+                if (n.Op == Op.Store && n.In[0].IsConst && LookedUp(n.In[1], resolved, 0) is { } idiom)
                 {
                     statics[(ulong)n.In[0].Imm] = idiom;
                     n.Dead = true;
@@ -989,6 +989,27 @@ public sealed partial class Normalizer(ProgramAnalysis program)
     }
 
     private static bool IsLazyTarget(Node n) => n.Op == Op.Idiom && (IdiomKind)n.Imm is IdiomKind.InternalCall or IdiomKind.PInvokeTarget;
+
+    private static readonly bool NoMergedLookups = Environment.GetEnvironmentVariable("REWIND_NO_MERGED_ICALL_LOOKUPS") != null;
+
+    /// <summary>
+    /// The engine method a value is the looked-up pointer of: the lookup's result, or - where the compiler
+    /// merged the ends of several paths that each look the same method up (two inlined copies of one call into
+    /// the engine) - a merge of such results, all of the same name.
+    /// </summary>
+    private static Node? LookedUp(Node value, Dictionary<Node, Node> resolved, int depth)
+    {
+        if (resolved.TryGetValue(value, out Node? idiom)) return idiom;
+        if (NoMergedLookups || value.Op != Op.Phi || depth > 4 || value.In.Length == 0) return null;
+        Node? common = null;
+        foreach (Node input in value.In)
+        {
+            if (ReferenceEquals(input, value)) continue;
+            if (LookedUp(input, resolved, depth + 1) is not { } one || (common != null && !ReferenceEquals(common, one))) return null;
+            common = one;
+        }
+        return common;
+    }
 
     /// <summary>
     /// An interface call in tail position is compiled as the search with a jump at each end: one where the
