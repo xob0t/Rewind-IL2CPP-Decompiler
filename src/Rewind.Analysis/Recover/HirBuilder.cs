@@ -667,6 +667,17 @@ public sealed partial class HirBuilder
             block.Statements.RemoveAll(s => s is HAssign { Target: HLocal { Variable: var target } } && unread.Contains(target));
     }
 
+    /// <summary>
+    /// The marker standing in for what <paramref name="problem"/> (just reported) is about: when the marker is not
+    /// in the finished method, neither is the problem (see HMethod.SiteProblems).
+    /// </summary>
+    private HOpaque Site(HOpaque marker, string problem)
+    {
+        marker.Problem = problem;
+        _h.SiteProblems.Add(problem);
+        return marker;
+    }
+
     private void Problem(string text)
     {
         if (_peeking > 0 && (_computing ?? _peekSubject) is { } subject)
@@ -1115,8 +1126,9 @@ public sealed partial class HirBuilder
                 // A piece of a stack struct that did not turn out to be part of a struct copy: the bytes are
                 // likely other data in a reused slot (see StackSplitting).
                 if (s is SChunk && n.Op == Op.Load && IsFrameAddress(n.In[0], out int pieceAt)) FrameConflicts.Add(pieceAt);
-                Problem($"{s.GetType().Name[1..]} value used as data (%{n.Id} {n.Op})");
-                return new HOpaque(s.GetType().Name[1..].ToLowerInvariant()) { Type = TypeForBits(n.Type) };
+                string asData = $"{s.GetType().Name[1..]} value used as data (%{n.Id} {n.Op})";
+                Problem(asData);
+                return Site(new HOpaque(s.GetType().Name[1..].ToLowerInvariant()) { Type = TypeForBits(n.Type) }, asData);
         }
     }
 

@@ -173,14 +173,14 @@ public sealed partial class HirBuilder
             if (SingleBits(e) is { } asInt)
                 return new HConv(HConvKind.U8, new HConv(HConvKind.U4, asInt) { Type = _uint }) { Type = _ulong };
             Problem("float reinterpreted as bits (no BitConverter in this build)");
-            return new HOpaque("float_bits", e) { Type = _long };
+            return Site(new HOpaque("float_bits", e) { Type = _long }, "float reinterpreted as bits (no BitConverter in this build)");
         }
         if (ReferenceEquals(t, _double))
         {
             if (e is HConst { Value: double d }) return new HConst(BitConverter.DoubleToInt64Bits(d), _long);
             if (BitConverterMethod("DoubleToInt64Bits", _double) is { } toBits) return new HCall { Method = toBits, Arguments = [e], Type = _long };
             Problem("double reinterpreted as bits (no BitConverter in this build)");
-            return new HOpaque("double_bits", e) { Type = _long };
+            return Site(new HOpaque("double_bits", e) { Type = _long }, "double reinterpreted as bits (no BitConverter in this build)");
         }
         if (e is HConst { Value: int or long or bool } c)
         {
@@ -206,14 +206,14 @@ public sealed partial class HirBuilder
                 if (SingleFromBits(narrow) is { } asFloat) return asFloat;
             }
             Problem("bits reinterpreted as float (no BitConverter in this build)");
-            return new HOpaque("bits_to_float", bits) { Type = _float };
+            return Site(new HOpaque("bits_to_float", bits) { Type = _float }, "bits reinterpreted as float (no BitConverter in this build)");
         }
         if (ReferenceEquals(type, _double))
         {
             if (bits is HConst { Value: int or long } c) return new HConst(BitConverter.Int64BitsToDouble(Convert.ToInt64(c.Value)), _double);
             if (BitConverterMethod("Int64BitsToDouble", _long) is { } fromBits) return new HCall { Method = fromBits, Arguments = [bits], Type = _double };
             Problem("bits reinterpreted as double (no BitConverter in this build)");
-            return new HOpaque("bits_to_double", bits) { Type = _double };
+            return Site(new HOpaque("bits_to_double", bits) { Type = _double }, "bits reinterpreted as double (no BitConverter in this build)");
         }
         if (bits is HConst { Value: int or long } k)
         {

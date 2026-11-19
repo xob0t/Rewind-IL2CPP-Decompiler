@@ -138,8 +138,9 @@ public sealed partial class HirBuilder
         if (leaves == null || !Fits(leaves, how, nodes.Count))
         {
             _h.Locals.Remove(whole);
-            Problem($"could not rebuild {structType.DisplayName} from its registers");
-            return new HOpaque("struct_from_registers") { Type = structType };
+            string fromRegisters = $"could not rebuild {structType.DisplayName} from its registers";
+            Problem(fromRegisters);
+            return Site(new HOpaque("struct_from_registers") { Type = structType }, fromRegisters);
         }
 
         // The sources of the fields, where each one is known on its own.

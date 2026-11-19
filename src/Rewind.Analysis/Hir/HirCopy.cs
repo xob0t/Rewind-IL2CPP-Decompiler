@@ -46,7 +46,7 @@ internal static class HirCopy
             HMemberToken m => new HMemberToken { Method = m.Method, Field = m.Field, DeclaringType = m.DeclaringType, MethodArguments = m.MethodArguments },
             HCachedDelegate d => new HCachedDelegate((HField)Of(d.Cache), (HNewObject)Of(d.Creation)),
             HSelect s => new HSelect(Sub(s.Condition), Sub(s.WhenTrue), Sub(s.WhenFalse)),
-            HOpaque o => new HOpaque(o.Text, All(o.Operands)),
+            HOpaque o => new HOpaque(o.Text, All(o.Operands)) { Problem = o.Problem },
             _ => throw new NotSupportedException("no copy of " + e.GetType().Name),
         };
         copy.Type = e.Type;

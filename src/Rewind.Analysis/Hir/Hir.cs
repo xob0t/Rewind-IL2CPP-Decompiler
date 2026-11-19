@@ -200,6 +200,8 @@ public sealed class HOpaque(string text, params HExpr[] operands) : HExpr
 {
     public string Text = text;
     public HExpr[] Operands = operands;
+    /// <summary>The problem reported where this marker was made, if any (see HMethod.SiteProblems).</summary>
+    public string? Problem;
 }
 
 // ---- statements ----------------------------------------------------------------------------------------------
@@ -287,6 +289,13 @@ public sealed class HMethod
     public List<HBlock> Blocks = [];
     /// <summary>Things the recovery could not express faithfully; an empty list means a clean translation.</summary>
     public List<string> Problems = [];
+    /// <summary>
+    /// Problems that are each reported together with the marker (HOpaque.Problem) standing in for what was not
+    /// recovered. When no such marker is left in the finished method, the code that had the problem is no part
+    /// of it (a copy into a merged value nothing reads, a register a call turned out not to take), and the
+    /// problem goes with it.
+    /// </summary>
+    public HashSet<string> SiteProblems = [];
     /// <summary>Remarks that do not affect what the code does (for instance: it contains inlined code).</summary>
     public List<string> Notes = [];
     /// <summary>The methods whose statements, pasted in here, were put back as a call of the method.</summary>

@@ -1996,7 +1996,7 @@ public sealed partial class HirBuilder
                 if (isStruct && !NoUnboxedWords && StructLeaves(unboxed, type, u.Offset, n.Type.Bytes()) is { } words)
                     return new SParts(words, n.Type.Bytes());
                 Problem("partial read of an unboxed value");
-                return new SVal(new HOpaque("unbox_part", unboxed) { Type = TypeForBits(n.Type) });
+                return new SVal(Site(new HOpaque("unbox_part", unboxed) { Type = TypeForBits(n.Type) }, "partial read of an unboxed value"));
             }
             case PBits bits:
             {
@@ -2011,7 +2011,7 @@ public sealed partial class HirBuilder
                 return new SChunk(SnapshotOf(chunk.Owner, chunk.OwnerType, n.Addr), chunk.OwnerType, chunk.Offset, chunk.Size);
             case PUnknown unknown:
                 Problem("load: " + unknown.Why);
-                return new SVal(new HOpaque("load" + n.Type.Bytes(), Value(n.In[0])) { Type = TypeForBits(n.Type) });
+                return new SVal(Site(new HOpaque("load" + n.Type.Bytes(), Value(n.In[0])) { Type = TypeForBits(n.Type) }, "load: " + unknown.Why));
             default:
                 return SJunk.Instance;
         }
@@ -2291,8 +2291,9 @@ public sealed partial class HirBuilder
 
         if (!ok)
         {
-            Problem($"could not rebuild {structType.DisplayName} from register bits");
-            return new HOpaque("struct_from_bits", Value(n)) { Type = structType };
+            string fromBits = $"could not rebuild {structType.DisplayName} from register bits";
+            Problem(fromBits);
+            return Site(new HOpaque("struct_from_bits", Value(n)) { Type = structType }, fromBits);
         }
         HVar temp = _h.NewLocal(structType, "s");
         temp.AddressTaken = true;
@@ -2330,7 +2331,12 @@ public sealed partial class HirBuilder
                     return SJunk.Instance;
             }
             if (a.BaseSem is SVal { Type: PrimitiveSig { Element: Il2CppTypeEnum.I or Il2CppTypeEnum.U } }) return BinarySem(n);
-            Problem("address computation: " + (place is PUnknown unknown ? unknown.Why : place.GetType().Name[1..]));
+            // An address into something no managed location was found in: the arithmetic stays, as the operand
+            // of a marker (a number added to a reference is no value IL has).
+            string what = "address computation: " + (place is PUnknown unknown ? unknown.Why : place.GetType().Name[1..]);
+            Problem(what);
+            Sem arithmetic = BinarySem(n);
+            return arithmetic is SVal { Expr: var computed } ? new SVal(Site(new HOpaque("address", computed) { Type = TypeForBits(n.Type) }, what)) : arithmetic;
         }
         return BinarySem(n);
     }

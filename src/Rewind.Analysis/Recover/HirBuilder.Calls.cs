@@ -77,7 +77,7 @@ public sealed partial class HirBuilder
     private HExpr Missing(TypeSig type)
     {
         Problem("call argument was not captured");
-        return new HOpaque("missing_argument") { Type = type };
+        return Site(new HOpaque("missing_argument") { Type = type }, "call argument was not captured");
     }
 
     private Dictionary<int, Node> Projections(Node call)
