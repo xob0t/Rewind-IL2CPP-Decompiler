@@ -589,6 +589,21 @@ public sealed partial class HirBuilder
         return null;
     }
 
+    private static readonly bool NoNativeFloatArgs = Environment.GetEnvironmentVariable("REWIND_NO_NATIVE_FLOAT_ARGS") != null;
+
+    /// <summary>
+    /// The value in the <paramref name="index"/>th floating-point argument register at a call to a function nothing is
+    /// known about, when the method put one there: a double when the register's upper half is set too.
+    /// </summary>
+    private HExpr? NativeFloatArg(Node call, int index)
+    {
+        int position = _fn.Regs.SharedPositions ? index : _fn.Regs.FirstFloatPosition + index;
+        int register = _fn.Regs.FloatRegisterOf(position);
+        if (register < 0 || Input(call, ArgSlotKind.FloatReg, register * 4) is not { } low || Eval(low) is SJunk) return null;
+        bool isDouble = Input(call, ArgSlotKind.FloatReg, register * 4 + 1) is { } high && Eval(high) is not SJunk;
+        return FloatAt(call, position, isDouble);
+    }
+
     private void EmitCall(Node call, bool tail)
     {
         var info = (CallInfo)call.Aux!;
@@ -622,8 +637,17 @@ public sealed partial class HirBuilder
         Problem($"call to unidentified native function 0x{info.Target:X}");
         var args = new List<HExpr>();
         for (int i = 0; i < 4; i++)
+        {
+            bool taken = false;
             if (IntAt(call, i) is { } a && Eval(a) is not SJunk)
+            {
                 args.Add(Value(a));
+                taken = true;
+            }
+            // A floating-point argument (where the convention gives each position one register or the other: when
+            // the general register at its position holds nothing).
+            if (!NoNativeFloatArgs && (!taken || !_fn.Regs.SharedPositions) && NativeFloatArg(call, i) is { } f) args.Add(f);
+        }
         FinishCall(call, new HOpaque($"native_0x{info.Target:X}", args.ToArray()) { Type = _long }, info.NoReturn ? ReturnKind.Void : ReturnKind.Integer, _long, tail);
         if (info.NoReturn) Emit(new HThrow(new HOpaque("noreturn")), call.Addr);
     }
