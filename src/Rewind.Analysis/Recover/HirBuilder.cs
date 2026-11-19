@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns. See FORK.md.
+// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns, long stack slots that held a reference and a number. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
@@ -270,6 +270,39 @@ public sealed partial class HirBuilder
                 if (held is HConst) continue;
                 if ((IsSmallNumber(place.Type) && IsReference(held.Type)) || (IsReference(place.Type) && IsSmallNumber(held.Type))) FrameConflicts.Add(where);
             }
+        // A long slot is what an untyped slot is taken for, so a long alone says nothing; but one given both a
+        // reference and a number computed as a number (bits merged into it: the bools of one call's stack
+        // arguments, then an object for the next call) held two variables as well.
+        if (!NoLongSlotConflicts)
+        {
+            var references = new HashSet<int>();
+            var numbers = new HashSet<int>();
+            foreach (HBlock block in _h.Blocks)
+                foreach (HStmt s in block.Statements)
+                {
+                    if (s is not HAssign { Target: HLocal { Variable: var slot }, Value: var held } || !offsetOf.TryGetValue(slot, out int where) ||
+                        held.Type == null || held is HConst) continue;
+                    if (IsReference(held.Type)) references.Add(where);
+                    else if (IsNumber(held.Type) && held is not HLocal) numbers.Add(where);
+                }
+            // (Handed where a reference is taken counts as holding one: null is the constant 0 of the slot.)
+            foreach (HBlock block in _h.Blocks)
+                foreach (HStmt s in block.Statements)
+                    FinallyFolding.Visit(s, e =>
+                    {
+                        if (e is not HCall call || call.Method.Parameters.Length != call.Arguments.Length) return;
+                        for (int i = 0; i < call.Arguments.Length; i++)
+                            if (call.Arguments[i] is HLocal { Variable: var v } && offsetOf.TryGetValue(v, out int at) &&
+                                call.Method.Parameters[i].Type is { IsValueType: false } wanted && wanted is not ByRefSig && IsReference(wanted))
+                                references.Add(at);
+                    });
+            foreach (int where in references)
+                if (numbers.Contains(where))
+                {
+                    FrameConflicts.Add(where);
+                    ScalarSlotConflicts.Add(where);
+                }
+        }
         // A struct kept in a number's slot (a struct that is one number, where an int was before): stored there,
         // or boxed from there as the struct. C# converts neither way; the slot held two variables.
         if (!NoStructSlots)
@@ -328,6 +361,7 @@ public sealed partial class HirBuilder
         IsBoolType(e.Type) || e is HConst { Value: false or true or 0 or 1 or 0L or 1L or (byte)0 or (byte)1 };
 
     private static readonly bool NoScalarConflicts = Environment.GetEnvironmentVariable("REWIND_NO_SCALAR_CONFLICTS") != null;
+    private static readonly bool NoLongSlotConflicts = Environment.GetEnvironmentVariable("REWIND_NO_LONG_SLOT_CONFLICTS") != null;
     private const string LostRegisterUsed = "a value kept in a callee-saved register is used after a caught exception";
     private static readonly bool NoLazyLostRegisters = Environment.GetEnvironmentVariable("REWIND_NO_LAZY_LOST_REGISTERS") != null;
     private static readonly bool NoStructSlots = Environment.GetEnvironmentVariable("REWIND_NO_STRUCT_SLOTS") != null;
