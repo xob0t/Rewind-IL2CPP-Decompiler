@@ -515,6 +515,7 @@ public sealed partial class HirBuilder
     private static readonly bool NoParamHalves = Environment.GetEnvironmentVariable("REWIND_NO_PARAM_HALVES") != null;
     private static readonly bool NoRefParamHalves = Environment.GetEnvironmentVariable("REWIND_NO_REF_PARAM_HALVES") != null;
     private static readonly bool NoStaticRefs = Environment.GetEnvironmentVariable("REWIND_NO_STATIC_REFS") != null;
+    private static readonly bool NoMergedStructBits = Environment.GetEnvironmentVariable("REWIND_NO_MERGED_STRUCT_BITS") != null;
     private static readonly bool NoArgumentConflicts = Environment.GetEnvironmentVariable("REWIND_NO_ARGUMENT_CONFLICTS") != null;
     private static readonly bool NoWideSwitches = Environment.GetEnvironmentVariable("REWIND_NO_WIDE_SWITCHES") != null;
 
@@ -1256,7 +1257,13 @@ public sealed partial class HirBuilder
                 // held with the merged value: it counts when that is read, not when the value itself is used
                 // for what it is (the class's methods read through it, the merge given back to each way in).
                 if (!NoCopyProblemsOnPhi) _peekSubject = phi;
-                value = Value(input);
+                // A merged struct that travels in a register (a struct of 8 bytes returned in RAX): what a way in
+                // gives as the register's bits is the struct those bits are, not a number made into it.
+                value = !NoMergedStructBits && IsStructType(variable.Type) && input.Type is VT.I32 or VT.I64 &&
+                    (s is SPair || s is SVal { Expr: not HConst, Type: PrimitiveSig bits } && !IsReference(bits) && BitsOf(bits) is > 0 and <= 64) &&
+                    _p.Layouts.Of(variable.Type) is { Known: true, Size: > 0 and <= 8 }
+                    ? StructFromBits(input, variable.Type)
+                    : Value(input);
             }
             finally
             {

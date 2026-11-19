@@ -2346,6 +2346,9 @@ public sealed partial class HirBuilder
         var parts = new List<(FieldSlot Slot, HExpr Value)>();
         bool ok = true;
         bool Direct(HExpr given, TypeSig field) => NoLowHalves || !IsStructType(field) || ReferenceEquals(given.Type, field);
+        // 32 bits widened without their sign: the first half, and nothing above it.
+        if (!NoMergedStructBits && s is SVal { Expr: not HConst } && n.Op == Op.ZExt && n.In[0].Type == VT.I32)
+            s = new SPair(Shortened(HConvKind.I4, _int, Value(n), 32), new HConst(0, _int));
         if (s is SPair pair && layout.Fields.Length == 2 && layout.Fields[0].Size == 4 && layout.Fields[1].Size == 4 &&
             Direct(pair.Low, layout.Fields[0].Type) && Direct(pair.High, layout.Fields[1].Type))
         {
