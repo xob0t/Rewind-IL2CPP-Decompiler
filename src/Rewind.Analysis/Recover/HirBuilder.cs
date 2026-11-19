@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns, long stack slots that held a reference and a number. See FORK.md.
+// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns, long stack slots that held a reference and a number, struct addresses typed as their target. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
@@ -232,12 +232,19 @@ public sealed partial class HirBuilder
                             TypeSig wanted = _m.Sigs.Substitute(declared is ByRefSig r ? r.ElementType : declared, classArgs, call.MethodArguments);
                             HExpr given = call.Arguments[i];
                             TypeSig? passed = given.Type is ByRefSig byRef ? byRef.ElementType : given.Type;
+                            // (An address is typed as what the call takes; what it points to is the local's own type.)
+                            if (!NoAddressTargetTypes && given is HAddressOf { Target: HLocal { Type: { } targetType } }) passed = targetType;
                             if (Open(wanted) || !IsStruct(wanted) || !IsStruct(passed) || wanted.Key == passed!.Key) continue;
                             // (One C# converts on its own, with the same bytes: a Span where a ReadOnlySpan is taken.)
                             if (SameBytesConversion(passed, wanted)) continue;
                             Problem($"a {passed.ShortName} handed where a {wanted.ShortName} is taken");
                             HExpr place = given is HAddressOf { Target: var t } ? t : given;
-                            if (place is HLocal { Variable: var v } && offsetOf.TryGetValue(v, out int at)) FrameConflicts.Add(at);
+                            if (place is HLocal { Variable: var v } && offsetOf.TryGetValue(v, out int at))
+                            {
+                                FrameConflicts.Add(at);
+                                // (What a call captures of the slot without taking it is no read of either struct.)
+                                if (!NoAddressTargetTypes) ScalarSlotConflicts.Add(at);
+                            }
                         }
                     });
         if (NoScalarConflicts) return;
@@ -361,6 +368,7 @@ public sealed partial class HirBuilder
         IsBoolType(e.Type) || e is HConst { Value: false or true or 0 or 1 or 0L or 1L or (byte)0 or (byte)1 };
 
     private static readonly bool NoScalarConflicts = Environment.GetEnvironmentVariable("REWIND_NO_SCALAR_CONFLICTS") != null;
+    private static readonly bool NoAddressTargetTypes = Environment.GetEnvironmentVariable("REWIND_NO_ADDRESS_TARGET_TYPES") != null;
     private static readonly bool NoLongSlotConflicts = Environment.GetEnvironmentVariable("REWIND_NO_LONG_SLOT_CONFLICTS") != null;
     private const string LostRegisterUsed = "a value kept in a callee-saved register is used after a caught exception";
     private static readonly bool NoLazyLostRegisters = Environment.GetEnvironmentVariable("REWIND_NO_LAZY_LOST_REGISTERS") != null;

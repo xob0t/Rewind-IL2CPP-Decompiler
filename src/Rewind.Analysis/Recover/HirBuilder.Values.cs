@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): virtual calls through merged class pointers, string indexer, gaps always marked, inlined object hash, small structs as numbers, floating-point negation, merged struct returns, low halves of 64-bit fields. See FORK.md.
+// Modified by xob0t (2026): virtual calls through merged class pointers, string indexer, gaps always marked, inlined object hash, small structs as numbers, floating-point negation, merged struct returns, low halves of 64-bit fields, casts of stored objects. See FORK.md.
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
 using Rewind.Analysis.X64;
@@ -1924,6 +1924,7 @@ public sealed partial class HirBuilder
 
     private static readonly bool NoBoxedTests = Environment.GetEnvironmentVariable("REWIND_NO_BOXED_TESTS") != null;
     private static readonly bool NoFlaggedCasts = Environment.GetEnvironmentVariable("REWIND_NO_FLAGGED_CASTS") != null;
+    private static readonly bool NoStoredCasts = Environment.GetEnvironmentVariable("REWIND_NO_STORED_CASTS") != null;
     private static readonly bool NoStructPieces = Environment.GetEnvironmentVariable("REWIND_NO_STRUCT_PIECES") != null;
     private static readonly bool NoStructTops = Environment.GetEnvironmentVariable("REWIND_NO_STRUCT_TOPS") != null;
     private static readonly bool FlaggedTrace = Environment.GetEnvironmentVariable("REWIND_FLAGGED_TRACE") != null;
@@ -2241,7 +2242,13 @@ public sealed partial class HirBuilder
                     Emit(new HAssign(new HDeref(through.Pointer) { Type = written }, ValueFor(valueNode, written)), n.Addr);
                     return;
                 }
-                Emit(new HAssign(loc.Location, ValueFor(valueNode, loc.Type)), n.Addr);
+                HExpr stored = ValueFor(valueNode, loc.Type);
+                // An object checked as a class before it is stored where only that class goes (the check pasted
+                // in and taken out): the store is of the cast object, as for an argument.
+                if (!NoStoredCasts && IsReference(loc.Type) && _castTypes.TryGetValue(valueNode, out List<TypeSig>? storedCasts) && storedCasts.Count == 1 &&
+                    stored.Type != null && !IsAssignable(stored.Type, loc.Type) && IsAssignable(storedCasts[0], loc.Type))
+                    stored = new HTypeExpr(HTypeOp.CastClass, storedCasts[0], stored) { Type = storedCasts[0] };
+                Emit(new HAssign(loc.Location, stored), n.Addr);
                 return;
             case PPair pair:
             {
