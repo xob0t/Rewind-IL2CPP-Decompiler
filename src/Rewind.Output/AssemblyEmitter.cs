@@ -90,13 +90,6 @@ public sealed class AssemblyEmitter
         DefineAttributes();
     }
 
-    private static byte[] TokenBytes(ulong token)
-    {
-        if (token == 0) return [];
-        byte[] bytes = BitConverter.GetBytes(token);
-        return bytes;
-    }
-
     private void CreateAssemblies()
     {
         foreach (AssemblyModel asm in _model.Assemblies)
@@ -115,17 +108,18 @@ public sealed class AssemblyEmitter
             _resolver.ByName[asm.Name] = assembly;
         }
 
-        // Declare references up front so the core library reference resolves to the mscorlib we emit.
+        // Declare references up front so the core library reference resolves to the mscorlib we emit. A reference
+        // names the assembly as it is rebuilt: the metadata keeps an assembly's public key token but not its key,
+        // so a rebuilt assembly has none, and a reference with the original token would be another identity -
+        // one the types imported from that assembly (which name the rebuilt one) do not use.
         foreach (AssemblyModel asm in _model.Assemblies)
         {
             ModuleDefinition module = _assemblies[asm].MainModule;
             foreach (AssemblyModel reference in asm.References)
             {
                 if (reference == asm) continue;
-                module.AssemblyReferences.Add(new AssemblyNameReference(reference.Name, reference.Version)
-                {
-                    PublicKeyToken = TokenBytes(reference.PublicKeyToken),
-                });
+                AssemblyNameDefinition rebuilt = _assemblies[reference].Name;
+                module.AssemblyReferences.Add(new AssemblyNameReference(rebuilt.Name, rebuilt.Version) { Culture = rebuilt.Culture });
             }
         }
     }
