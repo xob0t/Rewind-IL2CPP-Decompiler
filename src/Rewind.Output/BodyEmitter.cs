@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): inlined constructor folding, bits read as float/double. See FORK.md.
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Cecil.Rocks;

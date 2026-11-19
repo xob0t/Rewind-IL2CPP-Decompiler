@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): one AssemblyRef per assembly. See FORK.md.
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Rewind.Model;

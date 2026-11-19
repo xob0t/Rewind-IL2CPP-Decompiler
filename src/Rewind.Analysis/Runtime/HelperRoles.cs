@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): metadata initializer by use. See FORK.md.
 using Iced.Intel;
 using Rewind.Model;
 using Decoder = Iced.Intel.Decoder;

@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): gaps always marked, inlined constructor folding, bits read as float/double. See FORK.md.
 using System.Globalization;
 using System.Text;
 using Rewind.Model;

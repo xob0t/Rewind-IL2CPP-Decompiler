@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): gaps always marked, inlined constructor folding. See FORK.md.
 namespace Rewind.Analysis.Hir;
 
 /// <summary>

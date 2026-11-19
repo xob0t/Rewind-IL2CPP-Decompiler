@@ -1,3 +1,4 @@
+// Added by xob0t (2026): helpers behind widening wrappers, array accessors by shape. See FORK.md.
 using Iced.Intel;
 using Rewind.Model;
 using Decoder = Iced.Intel.Decoder;

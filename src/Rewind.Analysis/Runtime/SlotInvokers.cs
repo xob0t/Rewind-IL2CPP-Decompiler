@@ -1,3 +1,4 @@
+// Added by xob0t (2026): slot-specialized invokers. See FORK.md.
 using Iced.Intel;
 using Rewind.Analysis.X64;
 

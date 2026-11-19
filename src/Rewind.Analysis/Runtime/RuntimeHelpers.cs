@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): NewSpecific/NewAllocSpecific helper rules. See FORK.md.
 namespace Rewind.Analysis.Runtime;
 
 /// <summary>The libil2cpp support functions that generated code calls, by what they mean in managed terms.</summary>

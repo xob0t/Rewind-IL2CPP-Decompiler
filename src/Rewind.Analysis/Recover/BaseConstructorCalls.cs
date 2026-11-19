@@ -1,3 +1,4 @@
+// Added by xob0t (2026): base constructor calls, inlined constructor folding. See FORK.md.
 using Rewind.Analysis.Hir;
 using Rewind.Model;
 

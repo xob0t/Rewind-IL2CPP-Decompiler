@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): gaps always marked, base constructor calls, inlined constructor folding. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;

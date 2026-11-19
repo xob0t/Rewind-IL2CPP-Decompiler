@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): wide stores over inherited fields, gaps always marked, bits read as float/double. See FORK.md.
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
 using Rewind.Model;
