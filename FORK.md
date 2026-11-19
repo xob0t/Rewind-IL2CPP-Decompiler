@@ -1,7 +1,7 @@
 # About this fork
 
 This is a fork of [Rewind](https://github.com/ratman-bit/Rewind-IL2CPP-Decompiler) with fixes for issues found while decompiling a commercial Unity 6000.0.60f1 game (Windows x64, IL2CPP Master, metadata v31.1), for a port of that game to another platform.
-It is upstream's commit `ea8e305` plus 33 small commits, one change each, and a folder of game-free repros.
+It is upstream's commit `ea8e305` plus 34 small commits, one change each, and a folder of game-free repros.
 Upstream is welcome to take any part of it, as is or reworked; nothing here needs to be taken whole.
 
 - Base: [`ea8e305`](https://github.com/ratman-bit/Rewind-IL2CPP-Decompiler/commit/ea8e305) (upstream `main` as of 2026-11-19).
@@ -49,10 +49,12 @@ With a 6000.0.60f1 library, 14 of the 46 checks pass on upstream (the controls a
 | 29 | A switch through a byte-indexed jump table loses its case bodies | the two-level table is misread and the bodies disappear | `Issue29_ByteTable`, `Issue29_ByteTableFrom400` | open | fixed | a00faad |
 | 30 | Every call taken to clobber every volatile register | a value kept in r9 or xmm1 across the write-barrier helper becomes `__undefined()` | `Issue30_DoubleInLoop`, `Issue30_ReferenceInLoop` | open | fixed | 08bf547 |
 | 31 | An instruction duplicated into a block that falls into a join is lost | a loop counter incremented on both paths is lost on one, and the loop never ends | none yet | open | open | |
+| 32 | A class check on one path casts the object on every path | a method that checks `this` against a subclass on one path reads its own fields through that cast on every path, and throws `InvalidCastException` | none yet | open | fixed | a45bb78 |
 
 ## The changes
 
 One commit per change, on `ea8e305`, in this order; each applies and builds on the ones before it.
+Commits 1 to 33 come before the repros and these docs, 34 after them.
 Commit 22 adds a line to each changed or added source file saying it was changed (Apache-2.0 §4(b)), and the later commits keep those lines up to date, so 22 is the only one that touches files for that alone.
 
 | # | Commit | Change |
@@ -90,8 +92,9 @@ Commit 22 adds a line to each changed or added source file saying it was changed
 | 31 | 2bf0398 | Virtual calls on `this` merged from several paths, through a merged vtable-entry address or a merge of merges, are recovered. |
 | 32 | a00faad | A switch through a byte table of case indexes and a table of targets is recovered; the register a jump table jumps through is dead after the jump. |
 | 33 | 08bf547 | A direct call changes only the volatile registers the callee's code writes. |
+| 34 | a45bb78 | A class check casts the object only where every path to the use passes the check; a check on a path the CFG no longer has proves nothing. |
 
-After them: the repros (`repros/`) and these docs.
+After 33: the repros (`repros/`) and these docs.
 
 ## Building
 

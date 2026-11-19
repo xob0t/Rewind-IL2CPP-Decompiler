@@ -306,3 +306,24 @@ Rewind gives the first `inc ebx` its own local (`V10 = V3 + 1`) and tests that l
 The value at the join should be a phi of both paths' definitions of ebx.
 Not every block of this shape goes wrong; this one is the loop's induction variable, tested at the join and carried round the back edge.
 No repro yet.
+
+## 32. A class check on one path casts the object on every path
+
+An inlined `castclass` of `this` (the hierarchy compare and the throw) on one path of a method, before a field of the subclass, is taken out as a check and kept as a fact about `this` for the whole method.
+Every member access through `this` is then cast to the subclass, also the reads of the method's own class's fields on the paths that never made the check:
+
+```
+  mov  eax, [rdi+0x10]    ; a field of this's own class, on every path
+  cmp  eax, 7
+  jne  other
+  ...                     ; the hierarchy compare of this against the subclass, and the throw
+  mov  ecx, [rdi+0x48]    ; a field of the subclass
+other:
+  ...
+```
+
+Expected: `if (this.kind == 7) { ... ((Sub)this).count ... }`.
+Observed: `if (((Sub)this).kind == 7) { ... ((Sub)this).count ... }`, which throws `InvalidCastException` whenever `this` isn't the subclass, in a method with no gap.
+A check in a block a later simplification takes out still held everywhere, and a check's place was lost when its block was merged with the next.
+No repro yet.
+
