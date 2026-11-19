@@ -88,6 +88,7 @@ public sealed partial class HirBuilder
         if (!isDouble) return AsFloat(FloatValue(lo), type);
         if (Eval(lo) is SHalf { High: false } l && hi != null && Eval(hi) is SHalf { High: true } h && SameValue(l.Whole, h.Whole))
             return l.Whole;
+        if (hi != null && SignedLanes(lo, hi) is { } signed) return signed;
         if (Eval(lo) is SVal { Expr: HConst { Value: int low } } && hi != null && Eval(hi) is SVal { Expr: HConst { Value: int high } })
             return new HConst(BitConverter.Int64BitsToDouble((long)(uint)high << 32 | (uint)low), _double);
         HExpr bits = CombineParts([new Part(0, 4, HalfBits(lo)), new Part(4, 4, hi != null ? HalfBits(hi) : new HConst(0, _int))], 8);

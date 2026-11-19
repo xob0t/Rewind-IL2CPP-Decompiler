@@ -1755,6 +1755,11 @@ public sealed partial class HirBuilder
                     Emit(new HReturn(lo.Whole), ret.Addr);
                     return;
                 }
+                if (ret.In.Length == 2 && SignedLanes(ret.In[0], ret.In[1]) is { } signed)
+                {
+                    Emit(new HReturn(signed), ret.Addr);
+                    return;
+                }
                 // The two halves come from different places: the double is whatever those 64 bits spell.
                 HExpr bits = CombineParts([new Part(0, 4, HalfBits(ret.In[0])), new Part(4, 4, ret.In.Length > 1 ? HalfBits(ret.In[1]) : new HConst(0, _int))], 8);
                 Emit(new HReturn(ValueFromBits(bits, _double, 8)), ret.Addr);

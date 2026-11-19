@@ -629,6 +629,23 @@ public sealed partial class Normalizer(ProgramAnalysis program)
                     changed = true;
                     continue;
                 }
+                // Two halves under one mask each are the whole under the mask made of both: "xorps x, m" on a
+                // double whose mask was loaded once (ahead of a loop) is a 32-bit operation per lane, with
+                // constants known only now. The whole, its halves put together, folds or merges as above.
+                if (n.Op == Op.Concat && !NoMaskedHalves && MaskedHalves(n) is var (op, wholeHigh, wholeLow, mask))
+                {
+                    _b.Current = b;
+                    _b.InsertIndex = i;
+                    _b.CurrentAddr = n.Addr;
+                    int count = b.Nodes.Count;
+                    Node masked = _b.Binary(op, _b.Concat(wholeHigh, wholeLow), _b.Const(VT.I64, (long)mask));
+                    _b.InsertIndex = -1;
+                    i += b.Nodes.Count - count;
+                    _replace[n] = masked;
+                    n.Dead = true;
+                    changed = true;
+                    continue;
+                }
                 if (n.Op != Op.Trunc) continue;
                 Node operand = Resolve(n.In[0]);
                 if (operand.Op is not (Op.Or or Op.And or Op.Const)) continue;
@@ -650,6 +667,67 @@ public sealed partial class Normalizer(ProgramAnalysis program)
         foreach (Block b in _fn.Blocks) b.Nodes.RemoveAll(n => n.Dead);
         ApplyReplacements();
         return true;
+    }
+
+    private static readonly bool NoMaskedHalves = Environment.GetEnvironmentVariable("REWIND_NO_MASKED_HALVES") != null;
+
+    /// <summary>
+    /// A Concat whose top half is under a bitwise mask and whose bottom half is not (or is under the op's
+    /// identity, a constant known only now): the op, the two unmasked halves and the 64-bit mask. That is the
+    /// sign or magnitude of a double; two masked halves are two floats (a Vector2 negated), left as they are.
+    /// </summary>
+    private (Op Op, Node High, Node Low, ulong Mask)? MaskedHalves(Node concat)
+    {
+        Node high = Resolve(concat.In[0]), low = Resolve(concat.In[1]);
+        if (high.Op is not (Op.Xor or Op.And or Op.Or) || high.In.Length != 2 || high.Type != VT.I32 || low.Type != VT.I32 || low.IsConst) return null;
+        Node value = Resolve(high.In[0]), mask = Resolve(high.In[1]);
+        if (value.IsConst && !mask.IsConst) (value, mask) = (mask, value);
+        if (!mask.IsConst || value.IsConst) return null;
+        uint identity = high.Op == Op.And ? uint.MaxValue : 0u;
+        if (low.Op == high.Op && low.In.Length == 2)
+        {
+            Node a = Resolve(low.In[0]), b = Resolve(low.In[1]);
+            if (a.IsConst && !b.IsConst) (a, b) = (b, a);
+            if (b.IsConst && !a.IsConst)
+            {
+                if ((uint)b.UImm != identity) return null;
+                low = a;
+            }
+        }
+        // Only where the halves are those of a double: a struct of two floats with its second one negated
+        // looks the same.
+        if (!HalfOfDouble(value, []) && !HalfOfDouble(low, [])) return null;
+        return (high.Op, value, low, (mask.UImm & 0xFFFFFFFFUL) << 32 | identity);
+    }
+
+    /// <summary>Is this a half of the bits of a double: cut out of them, returned in the top lane, or merged from such halves (and constants)?</summary>
+    private bool HalfOfDouble(Node n, HashSet<Node> seen)
+    {
+        n = Resolve(n);
+        // (Met again: its answer is the one already being given - every part must be such a half.)
+        if (!seen.Add(n)) return true;
+        if (seen.Count > 64) return false;
+        switch (n.Op)
+        {
+            case Op.FToBits: return n.In[0].Type == VT.F64;
+            // The second lane of what a call returns in a vector register: only a double fills it.
+            case Op.Proj when n.Imm == CallResult.FloatLane1: return true;
+            case Op.Trunc: return HalfOfDouble(n.In[0], seen);
+            case Op.ShrU when n.In[1].IsConstValue(32): return HalfOfDouble(n.In[0], seen);
+            case Op.Phi:
+            {
+                bool any = false;
+                foreach (Node input in n.In)
+                {
+                    Node value = Resolve(input);
+                    if (value.IsConst || ReferenceEquals(value, n)) continue;
+                    if (!HalfOfDouble(value, seen)) return false;
+                    any = true;
+                }
+                return any;
+            }
+            default: return false;
+        }
     }
 
     private static readonly bool NoKnownZeros = Environment.GetEnvironmentVariable("REWIND_NO_KNOWN_ZEROS") != null;

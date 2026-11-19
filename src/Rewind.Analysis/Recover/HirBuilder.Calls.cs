@@ -26,6 +26,8 @@ public sealed partial class HirBuilder
         _fn.Regs.IsStackPosition(position) ? Input(call, ArgSlotKind.Stack, _fn.Regs.StackSlotOf(position))
         : _fn.Regs.IntRegisterOf(position) is int r and >= 0 ? Input(call, ArgSlotKind.IntReg, r) : null;
 
+    private static readonly bool NoDoubleHalves = Environment.GetEnvironmentVariable("REWIND_NO_DOUBLE_HALVES") != null;
+
     private HExpr FloatAt(Node call, int position, bool isDouble)
     {
         TypeSig type = isDouble ? _double : _float;
@@ -41,7 +43,12 @@ public sealed partial class HirBuilder
                 else if (slot.Op is Op.ZExt or Op.SExt && slot.In[0].Type == VT.I32 && !_materialize.Contains(slot) && !_sem.ContainsKey(slot)) slot = slot.In[0];
             }
             Sem s = Eval(slot);
-            if (s is SPair pair) return AsFloat(pair.Low, type);           // a float occupies the low half of its stack slot
+            if (s is SPair pair)
+            {
+                // A float occupies the low half of its stack slot; a double, both halves.
+                if (!isDouble || NoDoubleHalves) return AsFloat(pair.Low, type);
+                return ValueFromBits(CombineParts([new Part(0, 4, pair.Low), new Part(4, 4, pair.High)], 8), _double, 8);
+            }
             if (s is SVal v) return AsFloat(v.Expr, type);
             return AsFloat(Value(slot), type);
         }
@@ -54,6 +61,7 @@ public sealed partial class HirBuilder
         Node? hi = Input(call, ArgSlotKind.FloatReg, register * 4 + 1);
         if (Eval(lo) is SHalf { High: false } l && hi != null && Eval(hi) is SHalf { High: true } h && ReferenceEquals(l.Whole, h.Whole))
             return l.Whole;
+        if (hi != null && SignedLanes(lo, hi) is { } signed) return signed;
         if (Eval(lo) is SVal { Expr: HConst { Value: int low } } && hi != null && Eval(hi) is SVal { Expr: HConst { Value: int high } })
             return new HConst(BitConverter.Int64BitsToDouble((long)(uint)high << 32 | (uint)low), _double);
         HExpr bits = CombineParts([new Part(0, 4, HalfBits(lo)), new Part(4, 4, hi != null ? HalfBits(hi) : new HConst(0, _int))], 8);

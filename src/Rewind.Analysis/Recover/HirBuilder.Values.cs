@@ -267,7 +267,30 @@ public sealed partial class HirBuilder
         return call is HCall ? call : null;
     }
 
-    private static readonly bool NoWideShifts = Environment.GetEnvironmentVariable("REWIND_NO_WIDE_SHIFTS") != null;
+    /// <summary>
+    /// A double in the two 32-bit lanes of a register, its top lane under the sign mask ("xorps x, m" with m
+    /// loaded once and used lane by lane): "-x" or "Abs(x)". Null when the lanes are not that.
+    /// </summary>
+    private HExpr? SignedLanes(Node lo, Node hi)
+    {
+        if (NoSignedLanes || hi.Op is not (Op.Xor or Op.And) || hi.In.Length != 2) return null;
+        Node top = hi.In[0], mask = hi.In[1];
+        if (!mask.IsConst) (top, mask) = (mask, top);
+        if (!mask.IsConst || top.IsConst) return null;
+        bool negate = hi.Op == Op.Xor && (uint)mask.UImm == 0x80000000u, absolute = hi.Op == Op.And && (uint)mask.UImm == 0x7FFFFFFFu;
+        if (!negate && !absolute) return null;
+        // (The bottom lane under the same mask's bottom half: nothing changed.)
+        if (lo.Op == hi.Op && lo.In.Length == 2 && lo.In[1].IsConst && !lo.In[0].IsConst && (uint)lo.In[1].UImm == (negate ? 0u : uint.MaxValue)) lo = lo.In[0];
+        if (Eval(lo) is not SHalf { High: false, Part: null } low || Eval(top) is not SHalf { High: true, Part: null } high ||
+            !SameValue(low.Whole, high.Whole) || !ReferenceEquals(low.Whole.Type, _double))
+            return null;
+        if (negate) return new HUnary(HUnaryOp.Neg, low.Whole) { Type = _double };
+        return MathCall("Abs", true, low.Whole) is HCall abs ? abs : null;
+    }
+
+    private static readonly bool NoSignedLanes = Environment.GetEnvironmentVariable("REWIND_NO_SIGNED_LANES") != null;
+
+    private static readonly bool NoWideShifts =Environment.GetEnvironmentVariable("REWIND_NO_WIDE_SHIFTS") != null;
 
     private Sem BinarySem(Node n)
     {

@@ -303,6 +303,7 @@ public sealed class IrBuilder(Function fn)
     }
 
     internal static readonly bool NoSumHalves = Environment.GetEnvironmentVariable("REWIND_NO_SUM_HALVES") != null;
+    private static readonly bool NoBottomMasks = Environment.GetEnvironmentVariable("REWIND_NO_BOTTOM_MASKS") != null;
 
     /// <summary>
     /// Is "low" the bottom 32 bits of the 64-bit "whole"? Narrowing moves inside sums and the like when it is
@@ -315,7 +316,13 @@ public sealed class IrBuilder(Function fn)
         if (low.Type != VT.I32 || whole.Type != VT.I64) return false;
         if (whole.IsConst) return low.IsConst && (uint)low.UImm == (uint)whole.UImm;
         if (low.Op == Op.Trunc && ReferenceEquals(resolve != null ? resolve(low.In[0]) : low.In[0], whole)) return true;
-        if (depth >= 4 || low.Op != whole.Op || low.In.Length != 2 || whole.In.Length != 2) return false;
+        if (depth >= 4) return false;
+        // A mask that leaves the bottom half alone ("x ^ 8000000000000000h", the sign of a double): the bottom
+        // half of x is the bottom half of the masked x.
+        if (!NoBottomMasks && whole.Op is Op.Xor or Op.Or or Op.And && whole.In.Length == 2 && whole.In[1].IsConst && low.Op != whole.Op &&
+            (uint)whole.In[1].UImm == (whole.Op == Op.And ? uint.MaxValue : 0u))
+            return IsLowHalf(low, whole.In[0], resolve, depth + 1);
+        if (low.Op != whole.Op || low.In.Length != 2 || whole.In.Length != 2) return false;
         if (whole.Op is not (Op.Add or Op.Sub or Op.Mul or Op.And or Op.Or or Op.Xor)) return false;
         return IsLowHalf(low.In[0], whole.In[0], resolve, depth + 1) && IsLowHalf(low.In[1], whole.In[1], resolve, depth + 1);
     }
