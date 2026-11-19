@@ -5,6 +5,8 @@
   </picture>
 </p>
 
+> **This is a fork** of [ratman-bit/Rewind-IL2CPP-Decompiler](https://github.com/ratman-bit/Rewind-IL2CPP-Decompiler) at `ea8e305` with 33 separable fixes for Unity 6000.0 Master builds and game-free repros; see [FORK.md](FORK.md). This note was added by xob0t (2026); the rest of this README is upstream's.
+
 A decompiler for Unity games built with IL2CPP.
 
 When Unity builds a game with IL2CPP, it converts the C# to C++, compiles that to native code, and throws the
