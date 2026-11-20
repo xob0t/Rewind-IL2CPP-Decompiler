@@ -327,3 +327,23 @@ Observed: `if (((Sub)this).kind == 7) { ... ((Sub)this).count ... }`, which thro
 A check in a block a later simplification takes out still held everywhere, and a check's place was lost when its block was merged with the next.
 No repro yet.
 
+## 33. A class check taken to hold at uses it doesn't reach
+
+Issue 32's fix asked whether a check holds only for member reads; the other uses of the object still read the method-wide fact.
+An array element merged from two paths, stored into a field on one of them before the inlined class test of it on the other:
+
+```
+  mov  rbx, [rax+rcx*8+0x20]   ; the element, on both paths
+  test dl, dl
+  je   store
+  ...                          ; the hierarchy compare of rbx against a class, and the throw
+  ...
+store:
+  mov  [rdi+0x18], rbx         ; stored before any class test on this path
+```
+
+Expected: `this.target = element;` on the path that stores it, and the cast only after the test.
+Observed: the merged value is cast to the class at the merge, so the store throws `InvalidCastException` when the element is another class.
+The same held for a call's receiver and arguments, and for a merge's incoming value.
+Three smaller faults went with it: a use before its check counted as safe to reorder when no store or call was strictly between, although the use could be the store itself, or a load or division between could fault first; a check under a null test was kept from either arm, though only the arm taken when the object isn't null passes it; and a merged block's check lost its place when a later pass took out the node it was recorded before.
+No repro yet.
