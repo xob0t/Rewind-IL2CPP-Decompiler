@@ -37,14 +37,22 @@ STATS = HERE / 'work' / 'bin' / 'IlDump' / 'IlDump.dll'
 MARKERS = ('__Rewind.Opaque', '__Rewind.Effect')
 
 
+# What Issue34_PairInLoop and Issue34_PairOneCall return for pool { 1, 2, 3, 4, null, 5 }: two objects, each the
+# other's Other, the left one (even hash codes: 2 and 4) facing -1.
+ISSUE34_PAIR = ('#0 Angle=3.14159 Facing=-1 Hp=9999 Layer=6 Other=#1 Owner=owner Parts=Object[2] Range=0 | '
+                '#1 Angle=0 Facing=1 Hp=9999 Layer=6 Other=#0 Owner=owner Parts=Object[3] Range=0')
+
+
 class Repro:
     """One repro: its issue, the member in Rewind's C# (type file and a string on the member's first line), the
     native symbol's prefix, the expected C#, the check (on the C#, or on the IL when il='check'), and a regex
     selecting the native lines to show (None: no native excerpt)."""
 
-    def __init__(self, issue, name, type_name, member, symbol, expected, check, native=None, il=None):
+    def __init__(self, issue, name, type_name, member, symbol, expected, check, native=None, il=None, runs=None):
         self.issue, self.name, self.type_name, self.member = issue, name, type_name, member
         self.symbol, self.expected, self.check, self.native, self.il = symbol, expected, check, native, il
+        # runs: what the recovered method returns, as IlDump's run describes it; it must match too (Output.run).
+        self.runs = runs
 
 
 def no(*parts):
@@ -271,7 +279,18 @@ REPROS = [
     Repro('34', 'one allocation constructed on two paths, copied into a merge before the call', 'Issue34', 'Issue34[] Issue34_PairInLoop(',
           'Issue34_Issue34_PairInLoop', 'if (side == 0) left = new Issue34(owner, true, parts.ToArray());\nelse right = new Issue34(owner, false, parts.ToArray());',
           all_of(no('new Issue34('), has('GetUninitializedObject(typeof(Issue34))', '..ctor(owner, left: true', '..ctor(owner, left: false')),
-          native=r'.'),
+          native=r'.', runs=ISSUE34_PAIR),
+    Repro('34', 'control: one constructor call, its object given to one of two merged variables', 'Issue34', 'Issue34[] Issue34_PairOneCall(',
+          'Issue34_Issue34_PairOneCall', 'Issue34 leg = new Issue34(owner, side == 0, parts.ToArray());\nif (side == 0) left = leg;\nelse right = leg;',
+          all_of(no('__Rewind.Opaque', '__Rewind.Effect')), native=r'.', runs=ISSUE34_PAIR),
+    Repro('34', 'control: one path calls the constructor, the other has it inline', 'Issue34Leg', 'Issue34Leg[] Issue34_MixedInLoop(',
+          'Issue34Leg_Issue34_MixedInLoop', 'if (side == 0) leg = new Issue34Leg(100);\nelse leg = new Issue34Leg(owner, side, parts.ToArray());',
+          all_of(no('__Rewind.Opaque', '__Rewind.Effect')), native=r'.',
+          runs='#0 Hp=100 Other=#1 Owner=null Side=0 | #1 Hp=3 Other=#0 Owner=owner Side=1'),
+    Repro('34', 'control: an object a catch constructs, read after the try', 'Issue34Wrap', 'Issue34Wrap[] Issue34_InCatch(',
+          'Issue34Wrap_Issue34_InCatch', 'catch (Exception e) { if (!(e is OutOfMemoryException)) failure = new Issue34Wrap(owner, i, e); }\nif (failure != null) failure.At += sum * 100;',
+          all_of(no('__Rewind.Opaque', '__Rewind.Effect')), native=r'.',
+          runs='#0 At=1504 Inner=NullReferenceException Owner=owner'),
 ]
 
 
@@ -299,12 +318,22 @@ class Output:
                 return dedent(body)
         raise KeyError(f'{type_name}: no member matching {member!r}')
 
+    def run(self, type_name, member):
+        """IlDump's description of what the recovered static method returns (see IlDump/Program.cs, run)."""
+        self._tool()
+        name = member.split('(')[0].split()[-1]
+        return subprocess.run([str(DOTNET), str(STATS), 'run', str(self.out / 'assemblies'), 'Repros',
+                               f'Repros.{type_name}', name], capture_output=True, text=True, check=True).stdout.strip()
+
+    def _tool(self):
+        if not STATS.exists() or any(p.stat().st_mtime > STATS.stat().st_mtime for p in (HERE / 'IlDump').glob('*.cs')):
+            subprocess.run([str(DOTNET), 'build', '-c', 'Release', str(HERE / 'IlDump'), '-o',
+                            str(STATS.parent), '--source', 'https://api.nuget.org/v3/index.json'],
+                           check=True, capture_output=True)
+
     def il(self, type_name, member):
         if self._il is None:
-            if not STATS.exists():
-                subprocess.run([str(DOTNET), 'build', '-c', 'Release', str(HERE / 'IlDump'), '-o',
-                                str(STATS.parent), '--source', 'https://api.nuget.org/v3/index.json'],
-                               check=True, capture_output=True)
+            self._tool()
             text = subprocess.run([str(DOTNET), str(STATS), 'il', str(self.out / 'assemblies'), 'Repros', 'Repros.'],
                                   capture_output=True, text=True, check=True).stdout
             self._il = {}
@@ -410,6 +439,10 @@ def main():
                 text = '(not shown in the C#)'
             il = output.il(r.type_name, r.member) if r.il else ''
             passed, detail = r.check(il if r.il == 'check' else text)
+            if passed and r.runs is not None:
+                ran_as = output.run(r.type_name, r.member)
+                if ran_as != r.runs:
+                    passed, detail = False, f'runs as {ran_as!r}, not {r.runs!r}'
         except KeyError as e:
             passed, detail = False, f'missing: {e}'
         failed += not passed

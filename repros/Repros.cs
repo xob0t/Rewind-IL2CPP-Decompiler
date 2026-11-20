@@ -991,5 +991,106 @@ namespace Repros
             right.Other = left;
             return new[] { left, right };
         }
+
+        // One constructor call, its object given to one of two variables a loop's later turn reads: the allocation's
+        // register may be moved into the merged variables ahead of the call, as in Issue34_PairInLoop.
+        public static Issue34[] Issue34_PairOneCall(object owner, object[] pool)
+        {
+            Issue34 left = null, right = null;
+            for (int side = 0; side < 2; side++)
+            {
+                var parts = new List<object>();
+                for (int i = 0; i < pool.Length; i++)
+                    if (pool[i] != null && (pool[i].GetHashCode() & 1) == side) parts.Add(pool[i]);
+                Issue34 leg = new Issue34(owner, side == 0, parts.ToArray());
+                if (side == 0) left = leg;
+                else right = leg;
+            }
+            left.Other = right;
+            right.Other = left;
+            return new[] { left, right };
+        }
+    }
+
+    // Issue 34, the other way round: one path calls the constructor, the other may have it pasted inline (a constructor
+    // small enough for MSVC to inline). Should the two "new" share one allocation, the inline path's stores read the
+    // object before (and without) the call, and "new T(args)" at the call would leave them a null or stale variable.
+    public sealed class Issue34Leg
+    {
+        public Issue34Leg Other;
+        public object Owner;
+        public int Side;
+        public int Hp;
+
+        // No reference stored (no write barrier), so small enough to be pasted inline.
+        public Issue34Leg(int hp)
+        {
+            Side = 0;
+            Hp = hp;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public Issue34Leg(object owner, int side, object[] parts)
+        {
+            Owner = owner;
+            Side = side;
+            Hp = parts.Length;
+        }
+
+        public static Issue34Leg[] Issue34_MixedInLoop(object owner, object[] pool)
+        {
+            Issue34Leg left = null, right = null;
+            for (int side = 0; side < 2; side++)
+            {
+                var parts = new List<object>();
+                for (int i = 0; i < pool.Length; i++)
+                    if (pool[i] != null && (pool[i].GetHashCode() & 1) == side) parts.Add(pool[i]);
+                Issue34Leg leg;
+                if (side == 0) leg = new Issue34Leg(100);
+                else leg = new Issue34Leg(owner, side, parts.ToArray());
+                if (side == 0) left = leg;
+                else right = leg;
+            }
+            left.Other = right;
+            right.Other = left;
+            return new[] { left, right };
+        }
+    }
+
+    // Issue 34 in a handler: the object a catch constructs is kept in a variable read after the try, as the class
+    // library's Task.InternalCancel keeps its TaskSchedulerException. The variable's copy for the code after the
+    // handler may be made ahead of the constructor call.
+    public sealed class Issue34Wrap
+    {
+        public object Owner;
+        public int At;
+        public Exception Inner;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public Issue34Wrap(object owner, int at, Exception inner)
+        {
+            Owner = owner;
+            At = at;
+            Inner = inner;
+        }
+
+        public static Issue34Wrap[] Issue34_InCatch(object owner, object[] pool)
+        {
+            Issue34Wrap failure = null;
+            int sum = 0;
+            for (int i = 0; i < pool.Length; i++)
+            {
+                try
+                {
+                    sum += pool[i].GetHashCode();
+                }
+                catch (Exception e)
+                {
+                    if (!(e is OutOfMemoryException)) failure = new Issue34Wrap(owner, i, e);
+                }
+            }
+            if (failure != null) failure.At += sum * 100;
+            return new[] { failure };
+        }
     }
 }

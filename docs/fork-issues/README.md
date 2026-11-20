@@ -375,3 +375,9 @@ The fork keeps the allocation raw when a merge copied it before its constructor 
 `Issue34_PairInLoop` makes the second shape (the copy is moved before the call on one arm); the first was seen on the game.
 
 On the game, a method that builds two objects in a loop, one for each side, was in the first shape: the first object stayed null and the statement after the loop threw. In mscorlib (Unity's), `Environment.GetStackTrace` and `RuntimeMethodInfo.Invoke` were in the second shape.
+
+Change 36 told a copy "before the call" by whether the call had been seen when the copy was built, which follows the order Rewind builds the blocks in, not the order the code runs in: a merge's copy on a path the call isn't on, built after the call's block, passed as a copy of a constructed object, and a read on another path (a field initialized inline there) wasn't looked at.
+Change 37 notes every read of the object with its block and place, and lets `new T(args)` stand for the allocation only when the one claiming call comes before all of them: first in its own block, and its block dominates every other block that reads the object.
+On the game that changed one more method of its own and two in mscorlib, `Task.InternalCancel` (its `TaskSchedulerException` was thrown from the variable's old value) and `RemotingServices.SerializeCallData`.
+No repro makes that shape yet: `Issue34_PairOneCall` (one call, the object given to one of two variables), `Issue34_MixedInLoop` (one arm calls a constructor, the other's is small enough to inline) and `Issue34_InCatch` (the object a catch constructs, read after the try, as in `Task.InternalCancel`) compile to shapes Rewind recovers with or without change 37, so they are controls.
+The issue's checks run the recovered method (`IlDump run`) and compare the objects it returns, which variable got which object included, not only the C#'s spelling.
