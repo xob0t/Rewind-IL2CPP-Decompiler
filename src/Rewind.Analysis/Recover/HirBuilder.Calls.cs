@@ -1840,6 +1840,7 @@ public sealed partial class HirBuilder
                 {
                     // Whether "new T(args)" can stand for the allocation and this call is settled once every block
                     // is built (SettleNewObjects): until then the allocation stays.
+                    fresh.ClaimSites.Add((_block, _nodeClock));
                     fresh.Claims.Add((_cur, made, new HCall
                     {
                         Method = method,

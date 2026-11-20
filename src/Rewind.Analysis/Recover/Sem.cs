@@ -168,6 +168,19 @@ internal sealed class SNewObject(TypeSig type, HVar variable) : Sem
     /// <summary>The "o = new T(args)" each constructor call that claimed the object made, with its block and the same
     /// call on the raw object, for when the allocation has to stay (HirBuilder.SettleNewObjects).</summary>
     public List<(HBlock Block, HAssign Made, HCall OnRaw)> Claims = [];
+    /// <summary>Where each claiming constructor call is: its block and the clock of its node (HirBuilder._nodeClock).</summary>
+    public List<(Block Block, long Clock)> ClaimSites = [];
+    /// <summary>
+    /// Where the object was read while the blocks were built (stores through it, copies into merges, arguments): per
+    /// block, the clock of the first read there. "new T(args)" can stand for the allocation only when the claiming
+    /// call comes before every one of them (HirBuilder.ClaimComesFirst).
+    /// </summary>
+    public Dictionary<Block, long> Uses = [];
+
+    public void NoteUse(Block block, long clock)
+    {
+        if (!Uses.TryGetValue(block, out long first) || clock < first) Uses[block] = clock;
+    }
     /// <summary>
     /// More than one constructor call claimed the object: MSVC put one allocation before a branch and a
     /// constructor call on each arm. "new T(args)" on one arm would leave the other arm's call nothing allocated.

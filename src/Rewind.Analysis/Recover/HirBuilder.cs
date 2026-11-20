@@ -926,7 +926,9 @@ public sealed partial class HirBuilder
         FindPieceCopies();
         FindPieceFills();
         foreach (Block b in cfg.ReversePostOrder) DeclarePhis(b);
+        _building = true;
         foreach (Block b in cfg.ReversePostOrder) ProcessBlock(b);
+        _building = false;
         SettleNewObjects();
         SettlePhis();
         RefineFloatPhis();
@@ -944,6 +946,10 @@ public sealed partial class HirBuilder
     }
 
     private readonly List<SNewObject> _freshObjects = [];
+    // A clock of the nodes as ProcessBlock reaches them, for the order of an object's reads and its constructor call
+    // within a block (SNewObject.Uses, ClaimSites); _building while the blocks are built.
+    private long _clock, _nodeClock;
+    private bool _building;
 
     /// <summary>
     /// "o = new T(args)" stands for an allocation and the constructor call that claimed it only when nothing else
@@ -957,7 +963,7 @@ public sealed partial class HirBuilder
         foreach (SNewObject fresh in _freshObjects)
         {
             if (fresh.Claims.Count == 0 || fresh.Allocation == null) continue;
-            if (!fresh.CopiedEarly && !fresh.Shared)
+            if (!fresh.CopiedEarly && !fresh.Shared && (NoClaimDominance || ClaimComesFirst(fresh)))
             {
                 foreach (HBlock block in _h.Blocks)
                     if (block.Statements.Remove(fresh.Allocation))
@@ -971,6 +977,24 @@ public sealed partial class HirBuilder
                 if (at >= 0) block.Statements[at] = new HEval(onRaw) { Address = made.Address };
             }
         }
+    }
+
+    /// <summary>
+    /// Whether the one constructor call that claimed the object comes before every read of it: in its own block after
+    /// the call's node, in any other block only where the call's block dominates it. A read anywhere else (a field
+    /// initialized inline on another path, a copy into a merge on the way to a block the call doesn't dominate) sees
+    /// the object as allocated, before or without that call; with "new T(args)" at the call it would read whatever
+    /// the variable held before, null or the object of a loop's previous turn. Whether a merge's copy came before
+    /// the call was told by the order the blocks were built in (SNewObject.CopiedEarly), which this doesn't depend on.
+    /// </summary>
+    private bool ClaimComesFirst(SNewObject fresh)
+    {
+        if (fresh.ClaimSites.Count != 1) return false;
+        var (at, clock) = fresh.ClaimSites[0];
+        foreach (var (block, first) in fresh.Uses)
+            if (ReferenceEquals(block, at) ? first < clock : !_cfg.Dominates(at, block))
+                return false;
+        return true;
     }
 
     /// <summary>The record of try region <paramref name="index"/>, made on first use.</summary>
@@ -1566,6 +1590,7 @@ public sealed partial class HirBuilder
     }
 
     private static readonly bool NoEarlyCopiedObjects = Environment.GetEnvironmentVariable("REWIND_NO_EARLY_COPIED_OBJECTS") != null;
+    private static readonly bool NoClaimDominance = Environment.GetEnvironmentVariable("REWIND_NO_CLAIM_DOMINANCE") != null;
     private static readonly bool NoCopyProblemsOnPhi = Environment.GetEnvironmentVariable("REWIND_NO_COPY_PROBLEMS_ON_PHI") != null;
 
     private readonly Dictionary<HVar, Node> _phiOfVar = [];
@@ -1765,6 +1790,7 @@ public sealed partial class HirBuilder
         {
             if (n.Dead) continue;
             _node = n;
+            _nodeClock = ++_clock;
             switch (n.Op)
             {
                 case Op.Store:
@@ -1864,6 +1890,8 @@ public sealed partial class HirBuilder
     {
         if (_sem.TryGetValue(n, out Sem? s))
         {
+            // A read of a freshly allocated object, for where its constructor call stands (ClaimComesFirst).
+            if (_building && s is SNewObject seen && !NoClaimDominance) seen.NoteUse(_block, _nodeClock);
             if (n.Op == Op.Phi)
             {
                 if (_peeking == 0) _phiRead.Add(n);
