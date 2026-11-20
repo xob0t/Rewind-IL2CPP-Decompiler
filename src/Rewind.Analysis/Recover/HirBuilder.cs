@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns, long stack slots that held a reference and a number, struct addresses typed as their target, merged statics pointers. See FORK.md.
+// Modified by xob0t (2026): virtual calls through merged class pointers, gaps always marked, small structs as numbers, floating-point negation, bits read as float/double, merged struct returns, long stack slots that held a reference and a number, struct addresses typed as their target, merged statics pointers, objects copied into a merge before their constructor runs. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
@@ -927,6 +927,7 @@ public sealed partial class HirBuilder
         FindPieceFills();
         foreach (Block b in cfg.ReversePostOrder) DeclarePhis(b);
         foreach (Block b in cfg.ReversePostOrder) ProcessBlock(b);
+        SettleNewObjects();
         SettlePhis();
         RefineFloatPhis();
         RefinePhiJoins();
@@ -940,6 +941,36 @@ public sealed partial class HirBuilder
         HirCleanup.Run(_h);
         if (HirCleanup.CheckTryRegions(_h) is { } broken) Problem("exception handling not reconstructed: " + broken);
         return _h;
+    }
+
+    private readonly List<SNewObject> _freshObjects = [];
+
+    /// <summary>
+    /// "o = new T(args)" stands for an allocation and the constructor call that claimed it only when nothing else
+    /// saw the object between them: no merge took a copy of it before the call (SNewObject.CopiedEarly), and no
+    /// other constructor call, on another path, ran on the same allocation (SNewObject.Shared). Then the bare
+    /// allocation goes. Otherwise it stays where it was, and each constructor runs on it as a call: what the code
+    /// does (MarkRawConstructors notes it).
+    /// </summary>
+    private void SettleNewObjects()
+    {
+        foreach (SNewObject fresh in _freshObjects)
+        {
+            if (fresh.Claims.Count == 0 || fresh.Allocation == null) continue;
+            if (!fresh.CopiedEarly && !fresh.Shared)
+            {
+                foreach (HBlock block in _h.Blocks)
+                    if (block.Statements.Remove(fresh.Allocation))
+                        break;
+                fresh.Allocation = null;
+                continue;
+            }
+            foreach (var (block, made, onRaw) in fresh.Claims)
+            {
+                int at = block.Statements.IndexOf(made);
+                if (at >= 0) block.Statements[at] = new HEval(onRaw) { Address = made.Address };
+            }
+        }
     }
 
     /// <summary>The record of try region <paramref name="index"/>, made on first use.</summary>
@@ -1466,6 +1497,8 @@ public sealed partial class HirBuilder
             {
                 s = Eval(input);
                 if (s is SJunk) continue;
+                // A copy of an object no constructor has run on yet (see SNewObject.CopiedEarly).
+                if (!NoEarlyCopiedObjects && s is SNewObject { Constructed: false } raw) raw.CopiedEarly = true;
                 // What cannot be said about the value as the merged value's copy (a class pointer is no data) is
                 // held with the merged value: it counts when that is read, not when the value itself is used
                 // for what it is (the class's methods read through it, the merge given back to each way in).
@@ -1532,6 +1565,7 @@ public sealed partial class HirBuilder
         return ReferenceEquals(to, from.Succs[cond.Op == Op.CmpEq ? 0 : 1]);
     }
 
+    private static readonly bool NoEarlyCopiedObjects = Environment.GetEnvironmentVariable("REWIND_NO_EARLY_COPIED_OBJECTS") != null;
     private static readonly bool NoCopyProblemsOnPhi = Environment.GetEnvironmentVariable("REWIND_NO_COPY_PROBLEMS_ON_PHI") != null;
 
     private readonly Dictionary<HVar, Node> _phiOfVar = [];

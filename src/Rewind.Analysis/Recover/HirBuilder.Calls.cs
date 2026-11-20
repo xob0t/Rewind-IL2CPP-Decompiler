@@ -1,4 +1,4 @@
-// Modified by xob0t (2026): float arguments of native calls, slot-specialized invokers, offset-0 field addresses, gaps always marked, small structs as numbers, floating-point negation, inlined compare-exchange on references, one virtual method through nested merges. See FORK.md.
+// Modified by xob0t (2026): float arguments of native calls, slot-specialized invokers, offset-0 field addresses, gaps always marked, small structs as numbers, floating-point negation, inlined compare-exchange on references, one virtual method through nested merges, objects copied into a merge before their constructor runs. See FORK.md.
 using Rewind.Analysis.Abi;
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
@@ -1786,8 +1786,11 @@ public sealed partial class HirBuilder
 
         // A constructor call on a freshly allocated object is "new T(args)".
         Node? receiver = receiverOverride ?? (abi.This != null ? IntAt(call, abi.This.Position + shift) : null);
-        if (method.Name == ".ctor" && receiver != null && Eval(receiver) is SNewObject { Constructed: false } fresh)
+        if (method.Name == ".ctor" && receiver != null && Eval(receiver) is SNewObject fresh &&
+            (!fresh.Constructed || (!NoEarlyCopiedObjects && fresh.Claims.Count > 0)))
         {
+            // A second constructor call on an allocation one already claimed: one allocation, a call on each arm.
+            if (fresh.Constructed) fresh.Shared = true;
             fresh.Constructed = true;
             bool inlined = false;
             if (fresh.Type.Definition is { } allocated && !ReferenceEquals(allocated, method.DeclaringType))
@@ -1820,16 +1823,33 @@ public sealed partial class HirBuilder
             }
             if (!inlined)
             {
-                if (fresh.Allocation != null)
-                {
-                    if (!_cur.Statements.Remove(fresh.Allocation))
-                        foreach (HBlock block in _h.Blocks)
-                            if (block.Statements.Remove(fresh.Allocation))
-                                break;
-                    fresh.Allocation = null;
-                }
                 var created = new HNewObject { Constructor = method, DeclaringType = declaring, Arguments = args, Type = fresh.Type };
-                Emit(new HAssign(new HLocal(fresh.Variable) { Type = fresh.Type }, created), call.Addr);
+                var made = new HAssign(new HLocal(fresh.Variable) { Type = fresh.Type }, created);
+                if (NoEarlyCopiedObjects)
+                {
+                    if (fresh.Allocation != null)
+                    {
+                        if (!_cur.Statements.Remove(fresh.Allocation))
+                            foreach (HBlock block in _h.Blocks)
+                                if (block.Statements.Remove(fresh.Allocation))
+                                    break;
+                        fresh.Allocation = null;
+                    }
+                }
+                else
+                {
+                    // Whether "new T(args)" can stand for the allocation and this call is settled once every block
+                    // is built (SettleNewObjects): until then the allocation stays.
+                    fresh.Claims.Add((_cur, made, new HCall
+                    {
+                        Method = method,
+                        DeclaringType = declaring,
+                        This = new HLocal(fresh.Variable) { Type = fresh.Type },
+                        Arguments = args,
+                        Type = abi.ReturnType,
+                    }));
+                }
+                Emit(made, call.Addr);
                 if (tail) Emit(new HReturn(null), call.Addr);
                 return;
             }
@@ -2378,6 +2398,7 @@ public sealed partial class HirBuilder
                     {
                         Allocation = new HAssign(new HLocal(variable) { Type = type }, new HTypeExpr(HTypeOp.Allocate, type, null) { Type = type }),
                     };
+                    _freshObjects.Add(fresh);
                     Emit(fresh.Allocation, call.Addr);
                     _sem[result] = fresh;
                 }

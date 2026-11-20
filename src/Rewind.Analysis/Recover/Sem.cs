@@ -1,3 +1,4 @@
+// Modified by xob0t (2026): objects copied into a merge before their constructor runs. See FORK.md.
 using Rewind.Analysis.Hir;
 using Rewind.Analysis.Ir;
 using Rewind.Model;
@@ -158,6 +159,20 @@ internal sealed class SNewObject(TypeSig type, HVar variable) : Sem
     public bool Constructed;
     /// <summary>The statement that stands for the bare allocation until a constructor call replaces it.</summary>
     public HAssign? Allocation;
+    /// <summary>
+    /// The object was copied into a merged value before its constructor ran (the register allocator moved the
+    /// allocation's result to where a later merge wants it, ahead of the call). "new T(args)" at the call would
+    /// leave those copies with what the variable held before.
+    /// </summary>
+    public bool CopiedEarly;
+    /// <summary>The "o = new T(args)" each constructor call that claimed the object made, with its block and the same
+    /// call on the raw object, for when the allocation has to stay (HirBuilder.SettleNewObjects).</summary>
+    public List<(HBlock Block, HAssign Made, HCall OnRaw)> Claims = [];
+    /// <summary>
+    /// More than one constructor call claimed the object: MSVC put one allocation before a branch and a
+    /// constructor call on each arm. "new T(args)" on one arm would leave the other arm's call nothing allocated.
+    /// </summary>
+    public bool Shared;
 }
 
 /// <summary>How deep a class sits in its inheritance chain: of a known type, or of an object's run-time class.</summary>
