@@ -1,7 +1,7 @@
 # About this fork
 
 This is a fork of [Rewind](https://github.com/ratman-bit/Rewind-IL2CPP-Decompiler) with fixes for issues found while decompiling a commercial Unity 6000.0.60f1 game (Windows x64, IL2CPP Master, metadata v31.1), for a port of that game to another platform.
-It is upstream's commit `ea8e305` plus 35 small commits, one change each, and a folder of game-free repros.
+It is upstream's commit `ea8e305` plus 36 small commits, one change each, and a folder of game-free repros.
 Upstream is welcome to take any part of it, as is or reworked; nothing here needs to be taken whole.
 
 - Base: [`ea8e305`](https://github.com/ratman-bit/Rewind-IL2CPP-Decompiler/commit/ea8e305) (upstream `main` as of 2026-11-19).
@@ -14,7 +14,7 @@ Upstream is welcome to take any part of it, as is or reworked; nothing here need
 "Repro" is the repro method in [repros/Repros.cs](repros/Repros.cs); 5 and 12 are not about native code, and those marked "none yet" were found on the game and have no repro.
 Status is the result of the issue's checks in `repros/check_repros.py` where there is a repro, otherwise what was seen on the game.
 "Partly" means the value is now right and nothing is left unmarked, but the output isn't yet the expected form, or some variants are still open.
-With a 6000.0.60f1 library, 14 of the 46 checks pass on upstream (the controls and issue 1) and 36 in the fork (checked 2026-11-20).
+With a 6000.0.60f1 library, 14 of the 46 checks pass on upstream (the controls and issue 1) and 36 in the fork (checked 2026-11-20); issue 34's check, added after, fails on the fork before change 36 and passes with it (37 of 47).
 
 | # | Issue | Short description | Repro | Upstream | Fork | Fork commits |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -51,11 +51,12 @@ With a 6000.0.60f1 library, 14 of the 46 checks pass on upstream (the controls a
 | 31 | An instruction duplicated into a block that falls into a join is lost | a loop counter incremented on both paths is lost on one, and the loop never ends | none yet | open | open | |
 | 32 | A class check on one path casts the object on every path | a method that checks `this` against a subclass on one path reads its own fields through that cast on every path, and throws `InvalidCastException` | none yet | open | fixed | a45bb78 |
 | 33 | A class check taken to hold at uses it doesn't reach | a call's receiver or argument, a store or a merge's incoming value is cast to a class checked on another path or later on the same one, and throws `InvalidCastException` | none yet | open | fixed | 3130179 |
+| 34 | `new T(args)` put where the constructor call is, though the allocation was used before it | a merge's copy of the allocation, made before the call, gets the variable's old value (or null); a second constructor call on the same allocation, on another path, runs on nothing allocated | `Issue34_PairInLoop` | open | fixed | 12166e5 |
 
 ## The changes
 
 One commit per change, on `ea8e305`, in this order; each applies and builds on the ones before it.
-Commits 1 to 33 come before the repros and these docs, 34 and 35 after them.
+Commits 1 to 33 come before the repros and these docs, 34 to 36 after them.
 Commit 22 adds a line to each changed or added source file saying it was changed (Apache-2.0 §4(b)), and the later commits keep those lines up to date, so 22 is the only one that touches files for that alone.
 
 | # | Commit | Change |
@@ -95,6 +96,7 @@ Commit 22 adds a line to each changed or added source file saying it was changed
 | 33 | 08bf547 | A direct call changes only the volatile registers the callee's code writes. |
 | 34 | a45bb78 | A class check casts the object only where every path to the use passes the check; a check on a path the CFG no longer has proves nothing. |
 | 35 | 3130179 | A class check casts a call's receiver and arguments, a store and a merge's incoming value only where it holds there; a use before its check is cast only when nothing between can fault or write; a null test's check is kept from the arm taken when the object isn't null; a merged block's check stays before the first node it covers. |
+| 36 | 12166e5 | An allocation a merge copied before its constructor call, or that two constructor calls share, stays allocated raw, and each constructor runs on it as a call. |
 
 After 33: the repros (`repros/`) and these docs.
 

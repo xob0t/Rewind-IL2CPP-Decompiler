@@ -268,6 +268,10 @@ REPROS = [
     Repro('30', 'reference kept in r9 across the write barrier, in a loop', 'Issue30', 'bool Issue30_ReferenceInLoop(',
           'Issue30_Issue30_ReferenceInLoop', 'Issue30 s = items[i];\nif (s != null && s.Owner == null) { s.Owner = this; Linked = s; return true; }',
           all_of(no('__Rewind.Opaque', '__Rewind.Effect'), matches(r'Linked = (?!null)\w+;')), native=r'.'),
+    Repro('34', 'one allocation constructed on two paths, copied into a merge before the call', 'Issue34', 'Issue34[] Issue34_PairInLoop(',
+          'Issue34_Issue34_PairInLoop', 'if (side == 0) left = new Issue34(owner, true, parts.ToArray());\nelse right = new Issue34(owner, false, parts.ToArray());',
+          all_of(no('new Issue34('), has('GetUninitializedObject(typeof(Issue34))', '..ctor(owner, left: true', '..ctor(owner, left: false')),
+          native=r'.'),
 ]
 
 

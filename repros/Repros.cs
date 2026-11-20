@@ -945,4 +945,51 @@ namespace Repros
             return false;
         }
     }
+    // Issue 34: an object copied into one of two merged variables before its constructor runs. MSVC merges the
+    // two "new" (one allocation before the branch, one constructor call after it) and moves the allocation's
+    // register into the variable each branch assigns, ahead of the call; "new T(args)" put at the call leaves
+    // the merged variables what they held before.
+    public sealed class Issue34
+    {
+        public Issue34 Other;
+        public object Owner;
+        public object[] Parts;
+        public int Facing;
+        public double Angle;
+        public int Layer;
+        public int Hp;
+        public double Range;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public Issue34(object owner, bool left, object[] parts)
+        {
+            Owner = owner;
+            Parts = parts;
+            Facing = 1;
+            Layer = 6;
+            Hp = 9999;
+            Range = 0.0;
+            if (left)
+            {
+                Facing = -1;
+                Angle += 3.14159;
+            }
+        }
+
+        public static Issue34[] Issue34_PairInLoop(object owner, object[] pool)
+        {
+            Issue34 left = null, right = null;
+            for (int side = 0; side < 2; side++)
+            {
+                var parts = new List<object>();
+                for (int i = 0; i < pool.Length; i++)
+                    if (pool[i] != null && (pool[i].GetHashCode() & 1) == side) parts.Add(pool[i]);
+                if (side == 0) left = new Issue34(owner, true, parts.ToArray());
+                else right = new Issue34(owner, false, parts.ToArray());
+            }
+            left.Other = right;
+            right.Other = left;
+            return new[] { left, right };
+        }
+    }
 }

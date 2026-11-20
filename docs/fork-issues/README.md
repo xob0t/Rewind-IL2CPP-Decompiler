@@ -347,3 +347,31 @@ Observed: the merged value is cast to the class at the merge, so the store throw
 The same held for a call's receiver and arguments, and for a merge's incoming value.
 Three smaller faults went with it: a use before its check counted as safe to reorder when no store or call was strictly between, although the use could be the store itself, or a load or division between could fault first; a check under a null test was kept from either arm, though only the arm taken when the object isn't null passes it; and a merged block's check lost its place when a later pass took out the node it was recorded before.
 No repro yet.
+
+## 34. `new T(args)` put where the constructor call is, though the allocation was used before it
+
+"new T(args)" compiles to an allocation and a constructor call on it; Rewind puts `o = new T(args)` where the call is and takes the bare allocation out.
+Two shapes MSVC makes use the allocation before, or besides, that call.
+One allocation before a branch, its register moved into the variable each arm assigns, then the constructor call where the arms join:
+
+```
+  call il2cpp::vm::Object::New       ; the allocation
+  test ebp, ebp
+  je   left
+  mov  r13, rax                      ; "right = it", before the constructor
+  xor  r8b, r8b
+  jmp  ctor
+left:
+  mov  r15, rax                      ; "left = it"
+  mov  r8b, 1
+ctor:
+  call T::.ctor                      ; this = rax
+```
+
+Expected: `left`/`right` get the object the constructor runs on.
+Observed: the merge's copies come before `o = new T(...)`, so they get what `o` held before: the previous turn's object, or null, and code reading them throws `NullReferenceException`.
+The second shape is one allocation before a branch and a constructor call on each arm (two `new T(...)` merged): the first call claims the allocation, and the other arm's call runs on `o` with nothing allocated (`o..ctor(...)` on null).
+The fork keeps the allocation raw when a merge copied it before its constructor call or two calls share it, and runs each constructor on it as a call, which is what the code does.
+`Issue34_PairInLoop` makes the second shape (the copy is moved before the call on one arm); the first was seen on the game.
+
+On the game, a method that builds two objects in a loop, one for each side, was in the first shape: the first object stayed null and the statement after the loop threw. In mscorlib (Unity's), `Environment.GetStackTrace` and `RuntimeMethodInfo.Invoke` were in the second shape.
