@@ -1728,8 +1728,8 @@ public sealed partial class HirBuilder
                         // A struct wrapping the object (see IsReferenceWrapper): the receiver is the object.
                         if (thisExpr.Type is { } held && IsReferenceWrapper(held)) thisExpr = Coerce(thisExpr, p.Type);
                         if (Eval(node) is SNewObject) { }
-                        else if (_castTypes.TryGetValue(node, out List<TypeSig>? casts) && casts.Count == 1 && !IsAssignable(thisExpr.Type, p.Type))
-                            thisExpr = new HTypeExpr(HTypeOp.CastClass, casts[0], thisExpr) { Type = casts[0] };
+                        else if (CheckedClassHere(node) is { } checkedAs && !IsAssignable(thisExpr.Type, p.Type))
+                            thisExpr = new HTypeExpr(HTypeOp.CastClass, checkedAs, thisExpr) { Type = checkedAs };
                     }
                     break;
                 }
@@ -1768,9 +1768,9 @@ public sealed partial class HirBuilder
                         else
                         {
                             arg = ValueFor(node, type);
-                            if (IsReference(type) && _castTypes.TryGetValue(node, out List<TypeSig>? casts) && casts.Count == 1 &&
-                                !IsAssignable(arg.Type, type) && IsAssignable(casts[0], type))
-                                arg = new HTypeExpr(HTypeOp.CastClass, casts[0], arg) { Type = casts[0] };
+                            if (IsReference(type) && CheckedClassHere(node) is { } checkedAs &&
+                                !IsAssignable(arg.Type, type) && IsAssignable(checkedAs, type))
+                                arg = new HTypeExpr(HTypeOp.CastClass, checkedAs, arg) { Type = checkedAs };
                         }
                     }
                     args[p.ArgumentIndex] = arg;

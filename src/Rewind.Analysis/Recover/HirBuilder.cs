@@ -36,7 +36,7 @@ public sealed partial class HirBuilder
     private readonly Dictionary<Node, int> _position = [];
     private readonly Dictionary<Node, List<TypeSig>> _castTypes = [];
     /// <summary>Where each object's class checks are (CastFact's At and From): a check holds only past its place.</summary>
-    private readonly Dictionary<Node, List<(Block At, Node? From)>> _castPlaces = [];
+    private readonly Dictionary<Node, List<(Block At, Node? From, IReadOnlyList<Node>? Over)>> _castPlaces = [];
     /// <summary>CastHoldsAtStart's answers, per object and block.</summary>
     private readonly Dictionary<(Node, Block), bool> _castAtStart = [];
     /// <summary>The node ProcessBlock is building: where in _block a use is.</summary>
@@ -505,35 +505,103 @@ public sealed partial class HirBuilder
     private bool CastHoldsHere(Node obj)
     {
         if (_cfg == null || _block == null) return true;
-        if (!_castPlaces.TryGetValue(obj, out List<(Block At, Node? From)>? places) || !_cfg.IsReachable(_block)) return false;
-        foreach (var (at, from) in places)
+        if (!_castPlaces.TryGetValue(obj, out List<(Block At, Node? From, IReadOnlyList<Node>? Over)>? places) || !_cfg.IsReachable(_block)) return false;
+        foreach (var (at, from, over) in places)
         {
             if (!ReferenceEquals(at, _block) || _node == null || !_position.TryGetValue(_node, out int here)) continue;
-            // From null, or a node a later pass took out of the block: the check is at the block's end at the latest.
-            if (from != null && !ReferenceEquals(from.Block, _block)) continue;
-            int checkAt = from != null && _position.TryGetValue(from, out int fromAt) ? fromAt : _block.Nodes.Count;
-            // Past the check; or before it with nothing between that the cast's throw would skip: the compiler loads
-            // fields before the class test it doesn't depend on, and the source's cast came first.
-            if (checkAt <= here || !EffectBetween(_block, here, checkAt)) return true;
+            int checkAt = CheckPosition(_block, from, over);
+            // Past the check; or before it, the use included, with nothing the cast's throw would skip or come before:
+            // the compiler loads fields before the class test it doesn't depend on, and the source's cast came first.
+            if (checkAt <= here || SafeToReorder(_block, here, checkAt, obj)) return true;
         }
         return CastHoldsAtStart(obj, _block, places);
     }
 
-    /// <summary>Whether a store or a call (an effect the native code performed) is between two nodes of block.</summary>
-    private static bool EffectBetween(Block block, int after, int before)
+    /// <summary>
+    /// The one class obj is checked as, where the node being built uses it (CastHoldsHere), or null. A check on another
+    /// path proves nothing here: a cast to its class at a call's receiver or argument, a store or a merge would throw
+    /// where the native code doesn't. REWIND_NO_CAST_DOMINANCE: anywhere, as before.
+    /// </summary>
+    private TypeSig? CheckedClassHere(Node obj) =>
+        _castTypes.TryGetValue(obj, out List<TypeSig>? casts) && casts.Count == 1 && (NoCastDominance || CastHoldsHere(obj)) ? casts[0] : null;
+
+    /// <summary>
+    /// As CheckedClassHere, for the value a merge takes on the edge from block from to block to: the check holds at
+    /// from's end, or it is in to before anything there that the cast's throw would skip or come before (the class test
+    /// of the merged object right after the merge, as PoliceHelicopter.start and HaxeException's constructor have it).
+    /// </summary>
+    private TypeSig? CheckedClassOnEdge(Node obj, Block from, Block to)
     {
-        for (int i = after + 1; i < before && i < block.Nodes.Count; i++)
-            if (!block.Nodes[i].Dead && block.Nodes[i].Op is Op.Store or Op.Call)
-                return true;
-        return false;
+        if (!_castTypes.TryGetValue(obj, out List<TypeSig>? casts) || casts.Count != 1) return null;
+        if (NoCastDominance || CastHoldsAtEnd(obj, from)) return casts[0];
+        if (_cfg != null && _castPlaces.TryGetValue(obj, out List<(Block At, Node? From, IReadOnlyList<Node>? Over)>? places))
+            foreach (var (at, check, over) in places)
+                if (ReferenceEquals(at, to) && _cfg.IsReachable(to) && SafeToReorder(to, 0, CheckPosition(to, check, over), obj))
+                    return casts[0];
+        return null;
     }
 
+    /// <summary>Whether a class check of obj holds at block's end: a check in block, or one on every way into it.</summary>
+    private bool CastHoldsAtEnd(Node obj, Block block)
+    {
+        if (_cfg == null) return true;
+        if (!_castPlaces.TryGetValue(obj, out List<(Block At, Node? From, IReadOnlyList<Node>? Over)>? places) || !_cfg.IsReachable(block)) return false;
+        foreach (var (at, _, _) in places)
+            if (ReferenceEquals(at, block)) return true;
+        return CastHoldsAtStart(obj, block, places);
+    }
+
+    /// <summary>
+    /// Where in block a check is: its From node; if a later pass took that out (a spill it removed), the first node
+    /// left of those it covers (Over, MergeLinearBlocks's record); else the block's end, the latest it can be.
+    /// </summary>
+    private int CheckPosition(Block block, Node? from, IReadOnlyList<Node>? over)
+    {
+        if (from != null && _position.TryGetValue(from, out int at) && at < block.Nodes.Count && ReferenceEquals(block.Nodes[at], from)) return at;
+        int first = block.Nodes.Count;
+        if (over != null)
+            foreach (Node n in over)
+                if (_position.TryGetValue(n, out int p) && p < first && ReferenceEquals(block.Nodes[p], n)) first = p;
+        return first;
+    }
+
+    /// <summary>
+    /// Whether a cast of obj at node here of block may come before the check at checkAt: nothing from the use itself up
+    /// to the check is a store or a call (which the native code performed before the check threw), or could fault
+    /// first (a load other than of obj's own fields, a division), so the cast's throw is the first thing that happens
+    /// either way. Before (Nov 2026) only stores and calls strictly between the two counted: a store as the use, or a
+    /// load through null between, came before the check's throw natively and after it with the cast.
+    /// </summary>
+    private static bool SafeToReorder(Block block, int here, int checkAt, Node obj)
+    {
+        for (int i = here; i < checkAt && i < block.Nodes.Count; i++)
+        {
+            Node n = block.Nodes[i];
+            if (n.Dead) continue;
+            switch (n.Op)
+            {
+                case Op.Store or Op.Call or Op.Return or Op.TailCall or Op.Unreachable:
+                case Op.DivS or Op.DivU or Op.RemS or Op.RemU:
+                    return false;
+                case Op.Load when !OfObject(n.In[0], obj):
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Whether an address is obj itself or obj plus a constant: one of its fields.</summary>
+    private static bool OfObject(Node address, Node obj) =>
+        ReferenceEquals(address, obj) ||
+        address.Op == Op.Add && address.In.Length == 2 &&
+        (ReferenceEquals(address.In[0], obj) && address.In[1].IsConst || ReferenceEquals(address.In[1], obj) && address.In[0].IsConst);
+
     /// <summary>Whether every way from the entry to block's first node passes the end of a block that checks obj.</summary>
-    private bool CastHoldsAtStart(Node obj, Block block, List<(Block At, Node? From)> places)
+    private bool CastHoldsAtStart(Node obj, Block block, List<(Block At, Node? From, IReadOnlyList<Node>? Over)> places)
     {
         if (_castAtStart.TryGetValue((obj, block), out bool known)) return known;
         var checks = new HashSet<Block>();
-        foreach (var (at, _) in places)
+        foreach (var (at, _, _) in places)
             if (_cfg.IsReachable(at)) checks.Add(at);
         var seen = new HashSet<Block> { _fn.Entry };
         var pending = new Stack<Block>();
@@ -551,10 +619,10 @@ public sealed partial class HirBuilder
     }
 
     /// <summary>A class check found while building (an unboxing's): it holds from node on.</summary>
-    private void AddCastPlace(Node obj, Block at, Node? from)
+    private void AddCastPlace(Node obj, Block at, Node? from, IReadOnlyList<Node>? over = null)
     {
-        if (!_castPlaces.TryGetValue(obj, out List<(Block At, Node? From)>? places)) _castPlaces[obj] = places = [];
-        places.Add((at, from));
+        if (!_castPlaces.TryGetValue(obj, out List<(Block At, Node? From, IReadOnlyList<Node>? Over)>? places)) _castPlaces[obj] = places = [];
+        places.Add((at, from, over));
         foreach (var key in _castAtStart.Keys.Where(k => ReferenceEquals(k.Item1, obj)).ToList()) _castAtStart.Remove(key);
     }
 
@@ -840,7 +908,7 @@ public sealed partial class HirBuilder
             if (!reach.IsReachable(cast.At) || EvalKlass(cast.Klass) is not { } type) continue;
             if (!_castTypes.TryGetValue(cast.Object, out List<TypeSig>? list)) _castTypes[cast.Object] = list = [];
             if (!list.Contains(type)) list.Add(type);
-            AddCastPlace(cast.Object, cast.At, cast.From);
+            AddCastPlace(cast.Object, cast.At, cast.From, cast.Over);
         }
 
         BindParameters();
@@ -1430,7 +1498,9 @@ public sealed partial class HirBuilder
             // code has checked to be of a class counts as that class.)
             if (value is not HConst && IsStructType(value.Type) && IsStructType(variable.Type) && !Open(value.Type))
                 _phiStructs[phi] = _phiStructs.TryGetValue(phi, out TypeSig? seen) && (seen == null || seen.Key != value.Type!.Key) ? null : value.Type;
-            TypeSig? incoming = _castTypes.TryGetValue(input, out List<TypeSig>? checkedAs) && checkedAs.Count == 1 ? checkedAs[0] : value.Type;
+            // A check counts on this edge only if it holds there (CheckedClassOnEdge): one on another way in proves
+            // nothing about what this edge gives.
+            TypeSig? incoming = CheckedClassOnEdge(input, from, to) ?? value.Type;
             if (value is not HConst && incoming != null && IsReference(incoming) && !Open(incoming))
                 _phiJoins[phi] = _phiJoins.TryGetValue(phi, out TypeSig? soFar) ? JoinTypes(soFar, incoming) : incoming;
             if (value is not HConst && incoming != null && IsReference(incoming) && IsReference(variable.Type) && !Open(incoming) &&

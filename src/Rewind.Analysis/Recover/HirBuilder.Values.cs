@@ -2323,9 +2323,9 @@ public sealed partial class HirBuilder
                 HExpr stored = ValueFor(valueNode, loc.Type);
                 // An object checked as a class before it is stored where only that class goes (the check pasted
                 // in and taken out): the store is of the cast object, as for an argument.
-                if (!NoStoredCasts && IsReference(loc.Type) && _castTypes.TryGetValue(valueNode, out List<TypeSig>? storedCasts) && storedCasts.Count == 1 &&
-                    stored.Type != null && !IsAssignable(stored.Type, loc.Type) && IsAssignable(storedCasts[0], loc.Type))
-                    stored = new HTypeExpr(HTypeOp.CastClass, storedCasts[0], stored) { Type = storedCasts[0] };
+                if (!NoStoredCasts && IsReference(loc.Type) && CheckedClassHere(valueNode) is { } storedAs &&
+                    stored.Type != null && !IsAssignable(stored.Type, loc.Type) && IsAssignable(storedAs, loc.Type))
+                    stored = new HTypeExpr(HTypeOp.CastClass, storedAs, stored) { Type = storedAs };
                 Emit(new HAssign(loc.Location, stored), n.Addr);
                 return;
             case PPair pair:

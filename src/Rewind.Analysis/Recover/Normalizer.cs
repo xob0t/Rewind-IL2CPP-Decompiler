@@ -13,9 +13,10 @@ public enum ThrowKind { None, NullReference, IndexOutOfRange, DivideByZero, Inva
 /// A type check the native code performed with "throw InvalidCastException" on failure: a castclass. It holds from From,
 /// a node of At, to At's end, and in what At's end leads to; From null: only past At's last node (the check was At's
 /// branch). MergeLinearBlocks keeps the place: a check merged into the block before it doesn't hold over that block's
-/// own nodes, which come before it.
+/// own nodes, which come before it. Over: the nodes of At the check covers, recorded by MergeLinearBlocks so the place
+/// survives a later pass taking From out (a spill it removes): the check is before the first of them left.
 /// </summary>
-public sealed record CastFact(Block At, Node Object, Node Klass, Node? From = null);
+public sealed record CastFact(Block At, Node Object, Node Klass, Node? From = null, IReadOnlyList<Node>? Over = null);
 
 public sealed class NormalizeResult
 {
@@ -1927,10 +1928,21 @@ public sealed partial class Normalizer(ProgramAnalysis program)
                     phi.Dead = true;
                 }
                 s.Phis.Clear();
-                // A class check that held past p's end (its removed branch was p's) holds from s's first node on.
+                // A class check that held past p's end (its removed branch was p's) holds from s's first node on; one
+                // from a node of p holds over s's nodes too. Over keeps which nodes those are (CastFact).
                 for (int c = 0; c < _result.Casts.Count; c++)
-                    if (ReferenceEquals(_result.Casts[c].At, p) && (_result.Casts[c].From == null || ReferenceEquals(_result.Casts[c].From, jump)))
-                        _result.Casts[c] = _result.Casts[c] with { From = s.Nodes.Count > 0 ? s.Nodes[0] : null };
+                {
+                    CastFact cast = _result.Casts[c];
+                    if (!ReferenceEquals(cast.At, p)) continue;
+                    if (cast.From == null || ReferenceEquals(cast.From, jump))
+                        _result.Casts[c] = cast with { From = s.Nodes.Count > 0 ? s.Nodes[0] : null, Over = s.Nodes.Count > 0 ? s.Nodes.ToList() : null };
+                    else
+                    {
+                        List<Node> over = cast.Over?.ToList() ?? p.Nodes.Skip(Math.Max(0, p.Nodes.IndexOf(cast.From))).Where(n => !ReferenceEquals(n, jump)).ToList();
+                        over.AddRange(s.Nodes);
+                        _result.Casts[c] = cast with { Over = over };
+                    }
+                }
                 p.Nodes.RemoveAt(p.Nodes.Count - 1);
                 foreach (Node n in s.Nodes)
                 {
@@ -1949,7 +1961,12 @@ public sealed partial class Normalizer(ProgramAnalysis program)
                 _fn.Blocks.Remove(s);
                 // A class check found in s is in p now, still from the same node (or past the end, s's end) on.
                 for (int c = 0; c < _result.Casts.Count; c++)
-                    if (ReferenceEquals(_result.Casts[c].At, s)) _result.Casts[c] = _result.Casts[c] with { At = p };
+                {
+                    CastFact cast = _result.Casts[c];
+                    if (!ReferenceEquals(cast.At, s)) continue;
+                    IReadOnlyList<Node>? over = cast.Over ?? (cast.From != null && s.Nodes.IndexOf(cast.From) is int at and >= 0 ? s.Nodes.Skip(at).ToList() : null);
+                    _result.Casts[c] = cast with { At = p, Over = over };
+                }
                 ApplyReplacements();
                 progress = changed = true;
                 break;
@@ -1962,20 +1979,25 @@ public sealed partial class Normalizer(ProgramAnalysis program)
 
     /// <summary>
     /// A class check in an arm that goes: the arm's check holds past p when p's branch is a null test of the checked
-    /// object (castclass's "if (o != null) check o's class"), since null passes any cast; any other check held on
-    /// one way only, and goes with its block (HirBuilder drops a check the CFG doesn't reach).
+    /// object (castclass's "if (o != null) check o's class") and the arm is the one taken when the object isn't null,
+    /// since null passes any cast and that arm is every non-null way past p; any other check held on one way only,
+    /// and goes with its block (HirBuilder drops a check the CFG doesn't reach). Before (Nov 2026) a check in the null
+    /// arm was kept as well, and held at the join for an object that hadn't been checked.
     /// </summary>
     private void KeepNullSkippedChecks(Node condition, Block? viaA, Block? viaB, Block p)
     {
-        if (condition.Op is not (Op.CmpEq or Op.CmpNe)) return;
+        if (condition.Op is not (Op.CmpEq or Op.CmpNe) || p.Succs.Count != 2) return;
         Node x = Resolve(condition.In[0]), y = Resolve(condition.In[1]);
         Node? tested = y.IsConst && y.UImm == 0 ? x : x.IsConst && x.UImm == 0 ? y : null;
         if (tested == null) return;
+        // A branch goes to Succs[0] when its condition holds: "o == null" leaves for a non-null o by Succs[1].
+        Block nonNull = p.Succs[condition.Op == Op.CmpEq ? 1 : 0];
+        if (!ReferenceEquals(nonNull, viaA) && !ReferenceEquals(nonNull, viaB)) return;
         for (int c = 0; c < _result.Casts.Count; c++)
         {
             CastFact cast = _result.Casts[c];
-            if ((ReferenceEquals(cast.At, viaA) || ReferenceEquals(cast.At, viaB)) && ReferenceEquals(Resolve(cast.Object), tested))
-                _result.Casts[c] = cast with { At = p, From = null };
+            if (ReferenceEquals(cast.At, nonNull) && ReferenceEquals(Resolve(cast.Object), tested))
+                _result.Casts[c] = cast with { At = p, From = null, Over = null };
         }
     }
 
